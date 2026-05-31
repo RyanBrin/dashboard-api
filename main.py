@@ -45,7 +45,7 @@ async def lifespan(app: FastAPI):
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="dashboard-api", lifespan=lifespan)
+app = FastAPI(title="Nexus API", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ── Plaid helpers ─────────────────────────────────────────────────────────────
@@ -76,7 +76,7 @@ class ExchangeTokenBody(BaseModel):
 async def health():
     return {
         "status": "ok",
-        "service": "dashboard-api",
+        "service": "nexus-api",
         "plaid_env": os.getenv("PLAID_ENV", "NOT SET"),
         "plaid_client_id_set": bool(os.getenv("PLAID_CLIENT_ID")),
         "plaid_secret_set": bool(os.getenv("PLAID_SECRET")),
@@ -92,14 +92,14 @@ async def bank_dashboard():
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bank Dashboard</title>
+  <title>Nexus · Banking</title>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; padding: 24px; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #080F1A; color: #e2e8f0; padding: 24px; }}
     h1 {{ font-size: 1.5rem; font-weight: 800; color: #f8fafc; margin-bottom: 4px; }}
     .sub {{ color: #475569; font-size: 0.85rem; margin-bottom: 24px; }}
-    .btn {{ background: #3b82f6; color: white; border: none; padding: 10px 20px; border-radius: 8px; font-size: 0.9rem; font-weight: 600; cursor: pointer; }}
+    .btn {{ background: #0AAAFF; color: #080F1A; border: none; padding: 10px 20px; border-radius: 8px; font-size: 0.9rem; font-weight: 600; cursor: pointer; }}
     .btn:hover {{ background: #2563eb; }}
     .btn:disabled {{ background: #334155; cursor: not-allowed; }}
     .section {{ background: #111827; border: 1px solid #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 16px; }}
@@ -108,7 +108,7 @@ async def bank_dashboard():
     .account:last-child {{ border-bottom: none; }}
     .acct-name {{ font-size: 0.9rem; font-weight: 600; }}
     .acct-sub {{ font-size: 0.75rem; color: #64748b; margin-top: 2px; }}
-    .acct-bal {{ font-size: 1rem; font-weight: 700; color: #60a5fa; }}
+    .acct-bal {{ font-size: 1rem; font-weight: 700; color: #0AAAFF; }}
     .txn {{ display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #0f172a; font-size: 0.85rem; }}
     .txn:last-child {{ border-bottom: none; }}
     .txn-name {{ color: #cbd5e1; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
@@ -121,7 +121,7 @@ async def bank_dashboard():
   </style>
 </head>
 <body>
-  <h1>Bank Dashboard <span class="env-badge">{env}</span></h1>
+  <h1>Nexus <span style="color:#475569;font-weight:400;font-size:0.9rem">/ banking</span> <span class="env-badge">{env}</span></h1>
   <p class="sub">Connect your bank to see live balances and transactions.</p>
 
   <div style="margin-bottom:20px; display:flex; gap:10px; align-items:center;">
@@ -252,7 +252,7 @@ async def create_link_token():
         req = LinkTokenCreateRequest(
             products=[Products("transactions")],
             additional_consented_products=[Products("investments")],
-            client_name="Dashboard App",
+            client_name="Nexus",
             country_codes=[CountryCode("US")],
             language="en",
             user=LinkTokenCreateRequestUser(client_user_id="ryan-dashboard"),
