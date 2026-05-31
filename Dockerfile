@@ -8,10 +8,10 @@ ENV PATH="/root/.local/bin:${PATH}"
 COPY pyproject.toml ./
 COPY main.py ./
 
-RUN uv sync
+RUN uv pip install --system fastapi uvicorn asyncpg "plaid-python>=39.2.0" pydantic
 
 ENV PORT=8080
 
 EXPOSE 8080
 
-CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
