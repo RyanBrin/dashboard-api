@@ -100,7 +100,6 @@ async def create_link_token():
             country_codes=[CountryCode("US")],
             language="en",
             user=LinkTokenCreateRequestUser(client_user_id="ryan-dashboard"),
-            redirect_uri="dashboardapp://plaid",
         )
         resp = client.link_token_create(req)
         return {"link_token": resp["link_token"]}
