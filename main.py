@@ -75,7 +75,14 @@ class ExchangeTokenBody(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "dashboard-api"}
+    return {
+        "status": "ok",
+        "service": "dashboard-api",
+        "plaid_env": os.getenv("PLAID_ENV", "NOT SET"),
+        "plaid_client_id_set": bool(os.getenv("PLAID_CLIENT_ID")),
+        "plaid_secret_set": bool(os.getenv("PLAID_SECRET")),
+        "database_url_set": bool(os.getenv("DATABASE_URL")),
+    }
 
 # ── Plaid endpoints ───────────────────────────────────────────────────────────
 
