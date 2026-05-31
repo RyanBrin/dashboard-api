@@ -53,13 +53,11 @@ def _plaid_client():
     import plaid
     from plaid.api import plaid_api
 
-    env_map = {
-        "sandbox":     plaid.Environment.Sandbox,
-        "development": plaid.Environment.Development,
-        "production":  plaid.Environment.Production,
-    }
+    env_name = os.getenv("PLAID_ENV", "sandbox")
+    host = "https://production.plaid.com" if env_name == "production" else "https://sandbox.plaid.com"
+
     cfg = plaid.Configuration(
-        host=env_map.get(os.getenv("PLAID_ENV", "sandbox"), plaid.Environment.Sandbox),
+        host=host,
         api_key={
             "clientId": os.getenv("PLAID_CLIENT_ID", ""),
             "secret":   os.getenv("PLAID_SECRET", ""),
