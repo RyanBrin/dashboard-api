@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import asyncpg
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 # ── DB pool ───────────────────────────────────────────────────────────────────
@@ -81,6 +82,161 @@ async def health():
         "plaid_secret_set": bool(os.getenv("PLAID_SECRET")),
         "database_url_set": bool(os.getenv("DATABASE_URL")),
     }
+
+
+@app.get("/", response_class=HTMLResponse)
+async def bank_dashboard():
+    env = os.getenv("PLAID_ENV", "sandbox")
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bank Dashboard</title>
+  <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; padding: 24px; }}
+    h1 {{ font-size: 1.5rem; font-weight: 800; color: #f8fafc; margin-bottom: 4px; }}
+    .sub {{ color: #475569; font-size: 0.85rem; margin-bottom: 24px; }}
+    .btn {{ background: #3b82f6; color: white; border: none; padding: 10px 20px; border-radius: 8px; font-size: 0.9rem; font-weight: 600; cursor: pointer; }}
+    .btn:hover {{ background: #2563eb; }}
+    .btn:disabled {{ background: #334155; cursor: not-allowed; }}
+    .section {{ background: #111827; border: 1px solid #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 16px; }}
+    .section h2 {{ font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: .07em; margin-bottom: 14px; }}
+    .account {{ display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #1e293b; }}
+    .account:last-child {{ border-bottom: none; }}
+    .acct-name {{ font-size: 0.9rem; font-weight: 600; }}
+    .acct-sub {{ font-size: 0.75rem; color: #64748b; margin-top: 2px; }}
+    .acct-bal {{ font-size: 1rem; font-weight: 700; color: #60a5fa; }}
+    .txn {{ display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #0f172a; font-size: 0.85rem; }}
+    .txn:last-child {{ border-bottom: none; }}
+    .txn-name {{ color: #cbd5e1; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    .txn-meta {{ color: #475569; font-size: 0.75rem; }}
+    .debit {{ color: #f87171; font-weight: 600; }}
+    .credit {{ color: #4ade80; font-weight: 600; }}
+    #status {{ color: #94a3b8; font-size: 0.85rem; margin-top: 10px; }}
+    .env-badge {{ display: inline-block; background: {'#1e3a5f' if env == 'sandbox' else '#1a2e1a'}; color: {'#60a5fa' if env == 'sandbox' else '#4ade80'}; font-size: 0.72rem; font-weight: 700; padding: 3px 8px; border-radius: 10px; margin-left: 8px; text-transform: uppercase; }}
+    .total {{ font-size: 1.2rem; font-weight: 800; color: #f8fafc; }}
+  </style>
+</head>
+<body>
+  <h1>Bank Dashboard <span class="env-badge">{env}</span></h1>
+  <p class="sub">Connect your bank to see live balances and transactions.</p>
+
+  <div style="margin-bottom:20px; display:flex; gap:10px; align-items:center;">
+    <button class="btn" id="connectBtn" onclick="connectBank()">Connect Bank</button>
+    <button class="btn" id="refreshBtn" onclick="loadData()" style="background:#1e293b">Refresh</button>
+    <span id="status"></span>
+  </div>
+
+  <div id="accountsSection" style="display:none">
+    <div class="section">
+      <h2>Accounts</h2>
+      <div id="accounts"></div>
+      <div style="margin-top:12px; padding-top:12px; border-top:1px solid #1e293b; display:flex; justify-content:space-between;">
+        <span style="color:#64748b">Total balance</span>
+        <span class="total" id="totalBal">—</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="txnSection" style="display:none">
+    <div class="section">
+      <h2>Recent Transactions (30 days)</h2>
+      <div id="transactions"></div>
+    </div>
+  </div>
+
+  <script>
+    const API = '';
+
+    async function connectBank() {{
+      document.getElementById('status').textContent = 'Getting link token...';
+      document.getElementById('connectBtn').disabled = true;
+      try {{
+        const r = await fetch(API + '/plaid/create_link_token', {{method:'POST'}});
+        const data = await r.json();
+        if (!data.link_token) throw new Error(data.detail || 'No token');
+
+        const handler = Plaid.create({{
+          token: data.link_token,
+          onSuccess: async (public_token, metadata) => {{
+            document.getElementById('status').textContent = 'Linking account...';
+            const ex = await fetch(API + '/plaid/exchange_token', {{
+              method: 'POST',
+              headers: {{'Content-Type': 'application/json'}},
+              body: JSON.stringify({{public_token}})
+            }});
+            const exData = await ex.json();
+            document.getElementById('status').textContent = '✓ ' + (exData.institution || 'Account') + ' connected!';
+            loadData();
+          }},
+          onExit: (err) => {{
+            document.getElementById('status').textContent = err ? 'Error: ' + err.display_message : '';
+            document.getElementById('connectBtn').disabled = false;
+          }}
+        }});
+        handler.open();
+      }} catch(e) {{
+        document.getElementById('status').textContent = 'Error: ' + e.message;
+        document.getElementById('connectBtn').disabled = false;
+      }}
+    }}
+
+    async function loadData() {{
+      document.getElementById('status').textContent = 'Loading...';
+      try {{
+        const [acctR, txnR] = await Promise.all([
+          fetch(API + '/plaid/accounts').then(r => r.json()),
+          fetch(API + '/plaid/transactions?days=30').then(r => r.json())
+        ]);
+
+        const accounts = acctR.accounts || [];
+        const transactions = txnR.transactions || [];
+
+        if (accounts.length === 0) {{
+          document.getElementById('status').textContent = 'No accounts connected yet.';
+          return;
+        }}
+
+        // Render accounts
+        let total = 0;
+        document.getElementById('accounts').innerHTML = accounts.map(a => {{
+          const bal = a.current_balance || 0;
+          total += bal;
+          return `<div class="account">
+            <div><div class="acct-name">${{a.name}}</div><div class="acct-sub">${{a.institution || ''}} · ${{a.type}} · ${{a.subtype}}</div></div>
+            <div class="acct-bal">$${{bal.toLocaleString('en-US', {{minimumFractionDigits:2, maximumFractionDigits:2}})}}</div>
+          </div>`;
+        }}).join('');
+        document.getElementById('totalBal').textContent = '$' + total.toLocaleString('en-US', {{minimumFractionDigits:2}});
+        document.getElementById('accountsSection').style.display = 'block';
+
+        // Render transactions
+        document.getElementById('transactions').innerHTML = transactions.slice(0,50).map(t => {{
+          const amt = t.amount;
+          const cls = amt > 0 ? 'debit' : 'credit';
+          const sign = amt > 0 ? '-' : '+';
+          return `<div class="txn">
+            <div><div class="txn-name">${{t.name}}</div><div class="txn-meta">${{t.category}} · ${{t.date}}</div></div>
+            <span class="${{cls}}">${{sign}}$${{Math.abs(amt).toLocaleString('en-US', {{minimumFractionDigits:2}})}}</span>
+          </div>`;
+        }}).join('');
+        document.getElementById('txnSection').style.display = 'block';
+        document.getElementById('connectBtn').disabled = false;
+        document.getElementById('status').textContent = '';
+      }} catch(e) {{
+        document.getElementById('status').textContent = 'Error: ' + e.message;
+      }}
+    }}
+
+    // Auto-load on page open
+    loadData();
+  </script>
+</body>
+</html>"""
+    return html
 
 # ── Plaid endpoints ───────────────────────────────────────────────────────────
 
