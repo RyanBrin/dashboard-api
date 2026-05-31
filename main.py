@@ -96,7 +96,8 @@ async def create_link_token():
 
         client = _plaid_client()
         req = LinkTokenCreateRequest(
-            products=[Products("transactions"), Products("investments")],
+            products=[Products("transactions")],
+            additional_consented_products=[Products("investments")],
             client_name="Dashboard App",
             country_codes=[CountryCode("US")],
             language="en",
