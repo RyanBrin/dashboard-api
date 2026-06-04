@@ -157,7 +157,15 @@ async def bank_dashboard():
       try {{
         const r = await fetch(API + '/plaid/create_link_token', {{method:'POST'}});
         const data = await r.json();
-        if (!data.link_token) throw new Error(data.detail || 'No token');
+        if (!data.link_token) {{
+          const raw = data.detail || '';
+          let msg = 'Could not start bank connection.';
+          if (raw.includes('redirect_uri') || raw.includes('INVALID_REDIRECT_URI'))
+            msg = 'OAuth redirect URI not registered in Plaid dashboard.';
+          else if (raw.includes('INVALID_API_KEYS') || raw.includes('403'))
+            msg = 'Invalid Plaid credentials. Check Railway environment variables.';
+          throw new Error(msg);
+        }}
 
         const handler = Plaid.create({{
           token: data.link_token,
@@ -171,15 +179,26 @@ async def bank_dashboard():
               }});
               if (!ex.ok) {{
                 const errData = await ex.json().catch(() => ({{}}));
-                throw new Error(errData.detail || 'Exchange failed (' + ex.status + ')');
+                const raw = errData.detail || '';
+                // Translate common Plaid errors into human-readable messages
+                let msg = 'Could not save connection. Try again.';
+                if (raw.includes('redirect_uri') || raw.includes('INVALID_REDIRECT_URI'))
+                  msg = 'OAuth redirect URI not configured. Check Plaid dashboard settings.';
+                else if (raw.includes('INVALID_PUBLIC_TOKEN'))
+                  msg = 'Connection expired — please try again.';
+                else if (raw.includes('INVALID_API_KEYS') || raw.includes('403'))
+                  msg = 'Invalid Plaid API credentials. Check Railway PLAID_SECRET.';
+                else if (raw.includes('DATABASE_URL') || raw.includes('503'))
+                  msg = 'Database not configured. Check Railway DATABASE_URL.';
+                throw new Error(msg);
               }}
               const exData = await ex.json();
-              if (!exData.ok) throw new Error('Exchange returned not-ok');
+              if (!exData.ok) throw new Error('Connection could not be saved. Try again.');
               document.getElementById('status').textContent = '✓ ' + (exData.institution || 'Account') + ' connected!';
               document.getElementById('connectBtn').disabled = false;
               loadData();
             }} catch(exErr) {{
-              document.getElementById('status').textContent = '✗ Could not save connection: ' + exErr.message;
+              document.getElementById('status').textContent = '✗ ' + exErr.message;
               document.getElementById('connectBtn').disabled = false;
             }}
           }},
