@@ -392,9 +392,18 @@ async def get_accounts():
                 log.info("Fetched %d accounts from %s", len(resp["accounts"]), row["institution"])
             except Exception as e:
                 err_type = type(e).__name__
-                err_msg = str(e)
-                log.error("Plaid balance fetch failed for %s: %s — %s", row["institution"], err_type, err_msg[:200])
-                errors.append({"institution": row["institution"], "error": err_type, "detail": err_msg[:200]})
+                # Extract Plaid error_code from ApiException body if available
+                plaid_code = None
+                try:
+                    import json as _json
+                    body = getattr(e, "body", None)
+                    if body:
+                        parsed = _json.loads(body) if isinstance(body, str) else body
+                        plaid_code = parsed.get("error_code") or parsed.get("error_type")
+                except Exception:
+                    pass
+                log.error("Plaid balance fetch failed for %s: %s (Plaid code: %s)", row["institution"], err_type, plaid_code)
+                errors.append({"institution": row["institution"], "error": err_type, "plaid_error_code": plaid_code})
                 continue
         log.info("Total accounts fetched: %d, errors: %d", len(all_accounts), len(errors))
         return {"accounts": all_accounts, "fetch_errors": errors if errors else None}
