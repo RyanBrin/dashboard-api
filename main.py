@@ -32,7 +32,33 @@ async def _init_schema(pool):
                 access_token TEXT NOT NULL,
                 institution  TEXT,
                 created_at   TIMESTAMPTZ DEFAULT NOW()
-            )
+            );
+
+            -- Manual portfolio accounts (Fidelity, Schwab, etc.)
+            CREATE TABLE IF NOT EXISTS portfolio_accounts (
+                id           SERIAL PRIMARY KEY,
+                account_name TEXT NOT NULL,
+                institution  TEXT NOT NULL DEFAULT 'Fidelity',
+                account_type TEXT NOT NULL DEFAULT 'brokerage',
+                cash_balance NUMERIC(16,4) NOT NULL DEFAULT 0,
+                created_at   TIMESTAMPTZ DEFAULT NOW(),
+                updated_at   TIMESTAMPTZ DEFAULT NOW()
+            );
+
+            -- Manual holdings within a portfolio account
+            CREATE TABLE IF NOT EXISTS portfolio_holdings (
+                id               SERIAL PRIMARY KEY,
+                account_id       INTEGER NOT NULL REFERENCES portfolio_accounts(id) ON DELETE CASCADE,
+                symbol           TEXT NOT NULL,
+                description      TEXT,
+                quantity         NUMERIC(20,8) NOT NULL DEFAULT 0,
+                average_cost     NUMERIC(16,4),
+                current_price    NUMERIC(16,4),
+                current_value    NUMERIC(16,4) NOT NULL DEFAULT 0,
+                cost_basis       NUMERIC(16,4),
+                unrealized_pnl   NUMERIC(16,4),
+                updated_at       TIMESTAMPTZ DEFAULT NOW()
+            );
         """)
 
 @asynccontextmanager
@@ -593,6 +619,184 @@ async def get_transactions(days: int = 30):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Portfolio (manual — Fidelity/Schwab fallback) ─────────────────────────────
+
+from typing import Optional, List
+
+class PortfolioAccountIn(BaseModel):
+    account_name: str
+    institution:  str = "Fidelity"
+    account_type: str = "brokerage"   # brokerage | roth_ira | traditional_ira | 401k | other
+    cash_balance: float = 0.0
+
+class HoldingIn(BaseModel):
+    symbol:         str
+    description:    Optional[str] = None
+    quantity:       float
+    average_cost:   Optional[float] = None
+    current_price:  Optional[float] = None
+    current_value:  float
+    cost_basis:     Optional[float] = None
+    unrealized_pnl: Optional[float] = None
+
+class HoldingUpdate(BaseModel):
+    quantity:       Optional[float] = None
+    average_cost:   Optional[float] = None
+    current_price:  Optional[float] = None
+    current_value:  Optional[float] = None
+    cost_basis:     Optional[float] = None
+    unrealized_pnl: Optional[float] = None
+
+
+@app.get("/portfolio/manual")
+async def get_portfolio():
+    """Return all manual portfolio accounts with holdings and summary totals."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        accounts = await conn.fetch(
+            "SELECT id, account_name, institution, account_type, cash_balance, updated_at "
+            "FROM portfolio_accounts ORDER BY id"
+        )
+        all_holdings = await conn.fetch(
+            "SELECT id, account_id, symbol, description, quantity, average_cost, "
+            "current_price, current_value, cost_basis, unrealized_pnl, updated_at "
+            "FROM portfolio_holdings ORDER BY account_id, symbol"
+        )
+
+    holdings_by_account: dict = {}
+    for h in all_holdings:
+        holdings_by_account.setdefault(h["account_id"], []).append(dict(h))
+
+    result = []
+    total_cash = total_holdings = total_cost = total_pnl = 0.0
+    has_cost = has_pnl = False
+
+    for a in accounts:
+        aid  = a["id"]
+        hdgs = holdings_by_account.get(aid, [])
+        acct_holdings_val = sum(h["current_value"] or 0 for h in hdgs)
+        acct_cost         = sum(h["cost_basis"] or 0 for h in hdgs if h["cost_basis"])
+        acct_pnl          = sum(h["unrealized_pnl"] or 0 for h in hdgs if h["unrealized_pnl"])
+        has_cost = has_cost or any(h["cost_basis"] for h in hdgs)
+        has_pnl  = has_pnl  or any(h["unrealized_pnl"] for h in hdgs)
+        total_cash     += float(a["cash_balance"] or 0)
+        total_holdings += acct_holdings_val
+        total_cost     += acct_cost
+        total_pnl      += acct_pnl
+        result.append({
+            "id":            aid,
+            "account_name":  a["account_name"],
+            "institution":   a["institution"],
+            "account_type":  a["account_type"],
+            "cash_balance":  float(a["cash_balance"] or 0),
+            "holdings_value":round(acct_holdings_val, 2),
+            "total_value":   round(float(a["cash_balance"] or 0) + acct_holdings_val, 2),
+            "cost_basis":    round(acct_cost, 2) if has_cost else None,
+            "unrealized_pnl":round(acct_pnl, 2) if has_pnl else None,
+            "holdings":      hdgs,
+            "updated_at":    str(a["updated_at"]),
+        })
+
+    total_value = total_cash + total_holdings
+    return {
+        "accounts":            result,
+        "total_cash":          round(total_cash, 2),
+        "total_holdings_value":round(total_holdings, 2),
+        "total_portfolio_value":round(total_value, 2),
+        "total_cost_basis":    round(total_cost, 2) if has_cost else None,
+        "total_unrealized_pnl":round(total_pnl, 2) if has_pnl else None,
+        "account_count":       len(result),
+    }
+
+
+@app.post("/portfolio/manual/account", status_code=201)
+async def create_portfolio_account(body: PortfolioAccountIn):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO portfolio_accounts (account_name, institution, account_type, cash_balance) "
+            "VALUES ($1,$2,$3,$4) RETURNING id, account_name, institution, account_type, cash_balance",
+            body.account_name, body.institution, body.account_type, body.cash_balance
+        )
+    import logging; logging.getLogger(__name__).info("Portfolio account created: %s at %s", body.account_name, body.institution)
+    return dict(row)
+
+
+@app.put("/portfolio/manual/account/{account_id}")
+async def update_portfolio_account(account_id: int, body: PortfolioAccountIn):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE portfolio_accounts SET account_name=$1, institution=$2, account_type=$3, "
+            "cash_balance=$4, updated_at=NOW() WHERE id=$5 "
+            "RETURNING id, account_name, institution, account_type, cash_balance",
+            body.account_name, body.institution, body.account_type, body.cash_balance, account_id
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Account not found")
+    return dict(row)
+
+
+@app.delete("/portfolio/manual/account/{account_id}")
+async def delete_portfolio_account(account_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM portfolio_accounts WHERE id=$1", account_id)
+    return {"ok": True}
+
+
+@app.post("/portfolio/manual/holding", status_code=201)
+async def create_holding(account_id: int, body: HoldingIn):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # Verify account exists
+        exists = await conn.fetchval("SELECT id FROM portfolio_accounts WHERE id=$1", account_id)
+        if not exists:
+            raise HTTPException(status_code=404, detail="Account not found")
+        row = await conn.fetchrow(
+            "INSERT INTO portfolio_holdings "
+            "(account_id, symbol, description, quantity, average_cost, current_price, "
+            " current_value, cost_basis, unrealized_pnl) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, symbol, current_value",
+            account_id, body.symbol.upper(), body.description, body.quantity,
+            body.average_cost, body.current_price, body.current_value,
+            body.cost_basis, body.unrealized_pnl
+        )
+    return dict(row)
+
+
+@app.put("/portfolio/manual/holding/{holding_id}")
+async def update_holding(holding_id: int, body: HoldingUpdate):
+    pool = await get_pool()
+    fields, vals = [], []
+    if body.quantity        is not None: fields.append("quantity=$%d"        % (len(fields)+1,)); vals.append(body.quantity)
+    if body.average_cost    is not None: fields.append("average_cost=$%d"    % (len(fields)+1,)); vals.append(body.average_cost)
+    if body.current_price   is not None: fields.append("current_price=$%d"   % (len(fields)+1,)); vals.append(body.current_price)
+    if body.current_value   is not None: fields.append("current_value=$%d"   % (len(fields)+1,)); vals.append(body.current_value)
+    if body.cost_basis      is not None: fields.append("cost_basis=$%d"      % (len(fields)+1,)); vals.append(body.cost_basis)
+    if body.unrealized_pnl  is not None: fields.append("unrealized_pnl=$%d"  % (len(fields)+1,)); vals.append(body.unrealized_pnl)
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    fields.append(f"updated_at=NOW()")
+    vals.append(holding_id)
+    async with (await get_pool()).acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE portfolio_holdings SET {', '.join(fields)} WHERE id=${len(vals)} "
+            "RETURNING id, symbol, current_value, updated_at",
+            *vals
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Holding not found")
+    return dict(row)
+
+
+@app.delete("/portfolio/manual/holding/{holding_id}")
+async def delete_holding(holding_id: int):
+    async with (await get_pool()).acquire() as conn:
+        await conn.execute("DELETE FROM portfolio_holdings WHERE id=$1", holding_id)
+    return {"ok": True}
+
+
 @app.get("/finance/summary")
 async def finance_summary():
     """Single aggregated finance summary for the Android Home screen.
@@ -707,24 +911,51 @@ async def finance_summary():
 
     transactions.sort(key=lambda x: x["date"], reverse=True)
 
+    # Manual portfolio (Fidelity/Schwab fallback)
+    manual_portfolio_value = 0.0
+    manual_portfolio_accounts: list = []
+    try:
+        pool2 = await get_pool()
+        async with pool2.acquire() as conn:
+            port_accts = await conn.fetch(
+                "SELECT id, account_name, institution, account_type, cash_balance FROM portfolio_accounts"
+            )
+            port_hdgs = await conn.fetch(
+                "SELECT account_id, SUM(current_value) AS total FROM portfolio_holdings GROUP BY account_id"
+            )
+        hdg_by_acct = {r["account_id"]: float(r["total"] or 0) for r in port_hdgs}
+        for a in port_accts:
+            val = float(a["cash_balance"] or 0) + hdg_by_acct.get(a["id"], 0)
+            manual_portfolio_value += val
+            manual_portfolio_accounts.append({
+                "id": a["id"], "account_name": a["account_name"],
+                "institution": a["institution"], "account_type": a["account_type"],
+                "total_value": round(val, 2),
+            })
+    except Exception:
+        pass
+
     # Sandbox flag so the Android app can show an appropriate disclaimer
     plaid_env = os.getenv("PLAID_ENV", "sandbox")
-    has_cash_or_investments = total_cash > 0 or total_investments > 0
+    has_cash_or_investments = total_cash > 0 or total_investments > 0 or manual_portfolio_value > 0
 
     return {
-        "total_cash":              round(total_cash, 2),
-        "total_credit_card_debt":  round(total_credit_debt, 2),
-        "total_investments":       round(total_investments, 2),
-        "total_loans":             round(total_loans, 2),
-        "net_worth":               round(net_worth, 2),
-        "monthly_spending":        round(monthly_spending, 2),
-        "accounts":                accounts,
-        "credit_cards":            credit_cards,
-        "recent_transactions":     transactions[:25],
-        "has_connected_accounts":  len(accounts) > 0,
-        "has_cash_or_investments": has_cash_or_investments,
-        "plaid_env":               plaid_env,
-        "last_synced":             dt.datetime.utcnow().isoformat() + "Z",
+        "total_cash":                round(total_cash, 2),
+        "total_credit_card_debt":    round(total_credit_debt, 2),
+        "total_investments":         round(total_investments + manual_portfolio_value, 2),
+        "total_investments_plaid":   round(total_investments, 2),
+        "total_portfolio_manual":    round(manual_portfolio_value, 2),
+        "total_loans":               round(total_loans, 2),
+        "net_worth":                 round(net_worth + manual_portfolio_value, 2),
+        "monthly_spending":          round(monthly_spending, 2),
+        "accounts":                  accounts,
+        "credit_cards":              credit_cards,
+        "manual_portfolio_accounts": manual_portfolio_accounts,
+        "recent_transactions":       transactions[:25],
+        "has_connected_accounts":    len(accounts) > 0,
+        "has_cash_or_investments":   has_cash_or_investments,
+        "plaid_env":                 plaid_env,
+        "last_synced":               dt.datetime.utcnow().isoformat() + "Z",
     }
 
 
