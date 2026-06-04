@@ -283,7 +283,7 @@ async def create_link_token():
         # redirect_uri required for OAuth institutions (Chase, BofA, Wells Fargo, etc.)
         redirect_uri = os.getenv("PLAID_REDIRECT_URI", "")
         kwargs: dict = dict(
-            products=[Products("transactions"), Products("balance")],
+            products=[Products("transactions")],
             additional_consented_products=[Products("investments")],
             client_name="Nexus",
             country_codes=[CountryCode("US")],
