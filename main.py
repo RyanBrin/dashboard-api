@@ -283,7 +283,7 @@ async def create_link_token():
         # redirect_uri required for OAuth institutions (Chase, BofA, Wells Fargo, etc.)
         redirect_uri = os.getenv("PLAID_REDIRECT_URI", "")
         kwargs: dict = dict(
-            products=[Products("transactions")],
+            products=[Products("transactions"), Products("balance")],
             additional_consented_products=[Products("investments")],
             client_name="Nexus",
             country_codes=[CountryCode("US")],
@@ -368,45 +368,61 @@ async def get_accounts():
         if not rows:
             return {"accounts": [], "message": "No accounts connected yet"}
 
-        import logging
+        import logging, json as _json
         log = logging.getLogger(__name__)
+
+        def _parse_accounts(resp_accounts, institution):
+            result = []
+            for acct in resp_accounts:
+                result.append({
+                    "account_id":        acct["account_id"],
+                    "name":              acct["name"],
+                    "official_name":     acct.get("official_name"),
+                    "type":              str(acct["type"]),
+                    "subtype":           str(acct.get("subtype", "")),
+                    "current_balance":   acct["balances"]["current"],
+                    "available_balance": acct["balances"]["available"],
+                    "currency":          acct["balances"].get("iso_currency_code", "USD"),
+                    "institution":       institution,
+                })
+            return result
+
         all_accounts = []
-        errors = []
         for row in rows:
             try:
+                # Try real-time balance first (requires balance product)
                 resp = client.accounts_balance_get(
                     AccountsBalanceGetRequest(access_token=row["access_token"])
                 )
-                for acct in resp["accounts"]:
-                    all_accounts.append({
-                        "account_id":        acct["account_id"],
-                        "name":              acct["name"],
-                        "official_name":     acct.get("official_name"),
-                        "type":              str(acct["type"]),
-                        "subtype":           str(acct.get("subtype", "")),
-                        "current_balance":   acct["balances"]["current"],
-                        "available_balance": acct["balances"]["available"],
-                        "currency":          acct["balances"].get("iso_currency_code", "USD"),
-                        "institution":       row["institution"],
-                    })
-                log.info("Fetched %d accounts from %s", len(resp["accounts"]), row["institution"])
+                all_accounts.extend(_parse_accounts(resp["accounts"], row["institution"]))
+                log.info("Fetched %d accounts (balance) from %s", len(resp["accounts"]), row["institution"])
             except Exception as e:
-                err_type = type(e).__name__
-                # Extract Plaid error_code from ApiException body if available
+                # INVALID_PRODUCT: item was connected before balance product was added.
+                # Fall back to accounts_get which works with transactions product alone.
                 plaid_code = None
                 try:
-                    import json as _json
                     body = getattr(e, "body", None)
                     if body:
                         parsed = _json.loads(body) if isinstance(body, str) else body
-                        plaid_code = parsed.get("error_code") or parsed.get("error_type")
+                        plaid_code = parsed.get("error_code")
                 except Exception:
                     pass
-                log.error("Plaid balance fetch failed for %s: %s (Plaid code: %s)", row["institution"], err_type, plaid_code)
-                errors.append({"institution": row["institution"], "error": err_type, "plaid_error_code": plaid_code})
-                continue
-        log.info("Total accounts fetched: %d, errors: %d", len(all_accounts), len(errors))
-        return {"accounts": all_accounts, "fetch_errors": errors if errors else None}
+
+                if plaid_code == "INVALID_PRODUCT":
+                    try:
+                        from plaid.model.accounts_get_request import AccountsGetRequest
+                        resp2 = client.accounts_get(
+                            AccountsGetRequest(access_token=row["access_token"])
+                        )
+                        all_accounts.extend(_parse_accounts(resp2["accounts"], row["institution"]))
+                        log.info("Fetched %d accounts (fallback) from %s", len(resp2["accounts"]), row["institution"])
+                    except Exception as e2:
+                        log.error("Fallback accounts_get also failed for %s: %s", row["institution"], type(e2).__name__)
+                else:
+                    log.error("Plaid accounts fetch failed for %s: %s (code: %s)", row["institution"], type(e).__name__, plaid_code)
+
+        log.info("Total accounts fetched: %d", len(all_accounts))
+        return {"accounts": all_accounts}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
