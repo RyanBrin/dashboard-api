@@ -776,35 +776,193 @@ _KEYWORD_RULES: list[tuple[list[str], str]] = [
       "navient", "great lakes", "edfinancial"],                     "School"),
 ]
 
-def _exclude_from_budget(txn: dict) -> tuple[bool, str]:
-    """Returns (should_exclude, reason).
-    Excludes: income, transfers, credit card payments, pending."""
+# ── Income / paycheck detection ───────────────────────────────────────────────
+
+# Keyword signals that strongly suggest income regardless of merchant name
+_INCOME_KEYWORDS = {
+    "payroll", "direct deposit", "paycheck", "salary", "wages",
+    "employer deposit", "ach credit", "dd", "dir dep",
+}
+
+# Keyword signals that suggest a POS/debit purchase (spending)
+_PURCHASE_SIGNALS = {
+    "pos purchase", "pos debit", "check card", "debit card",
+    "card purchase", "card transaction", "purchase", "debit purchase",
+}
+
+
+def _is_income_transaction(txn: dict) -> tuple[bool, str]:
+    """
+    Determine if a transaction is income (paycheck, deposit, etc.).
+
+    Returns (is_income, income_type) where income_type is one of:
+        "paycheck"     – payroll / direct deposit
+        "deposit"      – other cash deposit / bank credit
+        "refund"       – merchant refund (credit back)
+        ""             – not income
+
+    Decision priority:
+      1. Pending → never income (not settled)
+      2. Plaid personal_finance_category INCOME/PAYROLL → paycheck
+      3. Plaid legacy category "payroll" → paycheck
+      4. Name contains strong income keywords → paycheck
+      5. Best Buy + depository credit context → paycheck
+      6. Negative amount on depository account with "deposit" in name → deposit
+      7. Refund signals → refund (excluded from spending but not tracked as income)
+    """
     if txn.get("pending"):
-        return True, "pending"
+        return False, ""
+
+    pfc      = (txn.get("personal_finance_category") or "").upper()
+    cat      = (txn.get("category") or "").lower()
+    name     = (txn.get("name") or "").lower()
+    amount   = float(txn.get("amount", 0))
+    acct_type = (txn.get("account_type") or "").lower()  # populated in _fetch_budget_transactions
+
+    # In Plaid's sign convention: negative amount = money arriving (credit to account)
+    is_credit_to_account = amount < 0
+
+    # ── 1. Plaid PFC: most authoritative ─────────────────────────────────────
+    if any(k in pfc for k in ("INCOME_PAYROLL", "INCOME_WAGES")):
+        return True, "paycheck"
+    if any(k in pfc for k in ("INCOME_DIVIDENDS", "INCOME_OTHER_INCOME", "INCOME_")):
+        return True, "deposit"
+
+    # ── 2. Plaid legacy category ──────────────────────────────────────────────
+    if "payroll" in cat:
+        return True, "paycheck"
+    if cat in ("deposit",) and is_credit_to_account:
+        return True, "deposit"
+
+    # ── 3. Strong income keyword in name (runs before merchant keywords) ──────
+    for kw in _INCOME_KEYWORDS:
+        if kw in name:
+            return True, "paycheck"
+
+    # ── 4. Best Buy payroll vs purchase disambiguation ────────────────────────
+    # This must run BEFORE the generic keyword table that would tag BB as spending.
+    if "best buy" in name:
+        # Check for purchase signals first — if present, it is a purchase
+        if any(sig in name for sig in _PURCHASE_SIGNALS):
+            return False, ""
+        # Depository credit (negative amount) = incoming deposit → paycheck
+        if is_credit_to_account and acct_type in ("depository", "checking", "savings", "cash", ""):
+            return True, "paycheck"
+        # Plaid already said it's income (belt-and-suspenders)
+        if any(k in pfc for k in ("INCOME", "PAYROLL")):
+            return True, "paycheck"
+        # Positive amount on depository that contains payroll signals → purchase
+        # (falls through to normal expense path)
+
+    # ── 5. Generic depository credits that look like deposits ─────────────────
+    if is_credit_to_account and acct_type in ("depository", "checking", "savings", "cash", ""):
+        if any(k in name for k in ("deposit", "credit", "refund", "return")):
+            # Distinguish refunds from true deposits
+            if any(k in name for k in ("refund", "return", "adjustment", "reversal")):
+                return True, "refund"
+            return True, "deposit"
+
+    return False, ""
+
+
+def _classify_transaction(txn: dict) -> dict:
+    """
+    Full classification pass for a single transaction.
+
+    Returns the txn dict augmented with:
+        is_income          bool
+        income_type        str  ("paycheck" | "deposit" | "refund" | "")
+        excluded_from_budget  bool
+        exclusion_reason   str
+        budget_category    str  (empty when excluded)
+    """
+    # ── Step 1: income detection (runs before everything else) ────────────────
+    is_income, income_type = _is_income_transaction(txn)
+
+    if is_income:
+        txn["is_income"]            = True
+        txn["income_type"]          = income_type
+        txn["excluded_from_budget"] = True
+        txn["exclusion_reason"]     = "income"
+        txn["budget_category"]      = ""
+        return txn
+
+    # ── Step 2: pending ───────────────────────────────────────────────────────
+    if txn.get("pending"):
+        txn["is_income"]            = False
+        txn["income_type"]          = ""
+        txn["excluded_from_budget"] = True
+        txn["exclusion_reason"]     = "pending"
+        txn["budget_category"]      = ""
+        return txn
+
     pfc  = (txn.get("personal_finance_category") or "").upper()
     cat  = (txn.get("category") or "").lower()
     name = (txn.get("name") or "").lower()
 
-    if any(k in pfc for k in ("INCOME", "PAYROLL", "DIVIDEND")):
-        return True, "income"
-    if "payroll" in cat or "income" in name:
-        return True, "income"
+    # ── Step 3: transfers ────────────────────────────────────────────────────
     if any(k in pfc for k in ("TRANSFER_IN", "TRANSFER_OUT", "ACCOUNT_TRANSFER")):
-        return True, "transfer"
-    if "transfer" in cat or "zelle" in name or "venmo" in name:
-        return True, "transfer"
+        txn.update(is_income=False, income_type="", excluded_from_budget=True,
+                   exclusion_reason="transfer", budget_category="")
+        return txn
+    if "transfer" in cat:
+        txn.update(is_income=False, income_type="", excluded_from_budget=True,
+                   exclusion_reason="transfer", budget_category="")
+        return txn
+    # Zelle/Venmo/CashApp are transfers unless they match income keywords (already handled above)
+    if any(k in name for k in ("zelle", "venmo", "cash app", "cashapp")):
+        txn.update(is_income=False, income_type="", excluded_from_budget=True,
+                   exclusion_reason="transfer", budget_category="")
+        return txn
+
+    # ── Step 4: credit card payments ─────────────────────────────────────────
     if "CREDIT_CARD_PAYMENT" in pfc or "LOAN_PAYMENTS_CREDIT_CARD" in pfc:
-        return True, "credit_card_payment"
+        txn.update(is_income=False, income_type="", excluded_from_budget=True,
+                   exclusion_reason="credit_card_payment", budget_category="")
+        return txn
     if "payment" in cat and "credit" in name:
-        return True, "credit_card_payment"
-    return False, ""
+        txn.update(is_income=False, income_type="", excluded_from_budget=True,
+                   exclusion_reason="credit_card_payment", budget_category="")
+        return txn
+
+    # ── Step 5: negative amounts are credits/income/refunds already handled ──
+    # If a negative amount slipped through (not already caught as income), exclude it
+    # rather than subtracting from spending totals.
+    if float(txn.get("amount", 0)) < 0:
+        txn.update(is_income=False, income_type="", excluded_from_budget=True,
+                   exclusion_reason="credit_to_account", budget_category="")
+        return txn
+
+    # ── Step 6: assign spending category ────────────────────────────────────
+    txn["is_income"]            = False
+    txn["income_type"]          = ""
+    txn["excluded_from_budget"] = False
+    txn["exclusion_reason"]     = ""
+    txn["budget_category"]      = _assign_category(txn)
+    return txn
+
+
+def _exclude_from_budget(txn: dict) -> tuple[bool, str]:
+    """Legacy shim — delegates to _classify_transaction.
+    Callers that only need (excluded, reason) can keep using this."""
+    result = _classify_transaction(dict(txn))  # operate on a copy
+    return result["excluded_from_budget"], result["exclusion_reason"]
 
 
 def _assign_category(txn: dict) -> str:
-    """Assign a budget category to a transaction using PFC → legacy → keyword rules."""
+    """Assign a spending budget category.
+    NOTE: income detection must have already run (via _classify_transaction).
+          This function only categorises genuine expense transactions.
+    """
     pfc   = (txn.get("personal_finance_category") or "").upper().replace(" ", "_")
     cat   = (txn.get("category") or "").lower()
     name  = ((txn.get("merchant_name") or txn.get("name") or "")).lower()
+
+    # 0. High-priority merchant overrides — run BEFORE legacy category map
+    #    so that e.g. "Best Buy" on a "shops" legacy category goes to Tech/Best Buy
+    #    rather than Shopping/Lifestyle.
+    if "best buy" in name:
+        return "Tech / Best Buy"
 
     # 1. Plaid personal_finance_category (most specific)
     for key, budget_cat in _PFC_MAP.items():
@@ -840,16 +998,20 @@ def _clean_display_name(name: str | None, merchant: str | None) -> str:
 
 
 async def _fetch_budget_transactions(month: str | None = None) -> list[dict]:
-    """Fetch and categorize transactions for a given month (YYYY-MM) or current month."""
+    """Fetch and classify transactions for a given month (YYYY-MM) or current month.
+
+    Each transaction dict includes:
+        is_income, income_type, excluded_from_budget, exclusion_reason, budget_category
+    """
     import datetime as dt
     from plaid.model.transactions_get_request import TransactionsGetRequest
     from plaid.model.transactions_get_request_options import TransactionsGetRequestOptions
+    from plaid.model.accounts_get_request import AccountsGetRequest
 
     today = dt.date.today()
     if month:
         year, mon = int(month[:4]), int(month[5:7])
         start = dt.date(year, mon, 1)
-        # Last day of month
         if mon == 12:
             end = dt.date(year + 1, 1, 1) - dt.timedelta(days=1)
         else:
@@ -867,8 +1029,18 @@ async def _fetch_budget_transactions(month: str | None = None) -> list[dict]:
 
     client = _plaid_client()
     all_txns: list[dict] = []
+
     for row in rows:
         try:
+            # Build account_id → account_type map so income detection has context
+            acct_type_map: dict[str, str] = {}
+            try:
+                acct_resp = client.accounts_get(AccountsGetRequest(access_token=row["access_token"]))
+                for a in acct_resp["accounts"]:
+                    acct_type_map[a["account_id"]] = str(a.get("type", "")).lower()
+            except Exception:
+                pass
+
             resp = client.transactions_get(
                 TransactionsGetRequest(
                     access_token=row["access_token"],
@@ -885,26 +1057,39 @@ async def _fetch_budget_transactions(month: str | None = None) -> list[dict]:
                         pfc = getattr(pfc_obj, "primary", "") or str(pfc_obj)
                 except Exception:
                     pass
+
+                acct_id   = t["account_id"]
+                acct_type = acct_type_map.get(acct_id, "")
+
                 txn = {
                     "transaction_id":            t["transaction_id"],
                     "date":                      str(t["date"]),
                     "display_name":              _clean_display_name(t.get("name"), t.get("merchant_name")),
                     "raw_name":                  t.get("name", ""),
                     "amount":                    float(t["amount"]),
-                    "account_id":                t["account_id"],
+                    # account_id NOT returned to clients — used only for classification
+                    "account_type":              acct_type,
                     "plaid_category":            t["category"][0] if t.get("category") else "",
                     "personal_finance_category": pfc,
                     "pending":                   bool(t["pending"]),
+                    # Classification defaults (overwritten by _classify_transaction)
+                    "is_income":                 False,
+                    "income_type":               "",
+                    "excluded_from_budget":      False,
+                    "exclusion_reason":          "",
+                    "budget_category":           "",
                 }
-                excluded, reason = _exclude_from_budget(txn)
-                txn["excluded_from_budget"] = excluded
-                txn["exclusion_reason"]     = reason
-                txn["budget_category"]      = "" if excluded else _assign_category(txn)
+                _classify_transaction(txn)   # mutates txn in-place
                 all_txns.append(txn)
         except Exception:
             continue
 
     all_txns.sort(key=lambda x: x["date"], reverse=True)
+
+    # Strip internal fields before returning to callers
+    for t in all_txns:
+        t.pop("account_type", None)   # never expose raw account metadata
+
     return all_txns
 
 
@@ -915,16 +1100,52 @@ async def budget_transactions(month: str = ""):
     return {"transactions": txns, "count": len(txns), "month": month or "current"}
 
 
+def _build_income_summary(txns: list[dict]) -> dict:
+    """Extract income/paycheck summary from a classified transaction list.
+    Returns only safe display fields — no raw account IDs or Plaid tokens.
+    """
+    income_txns = [t for t in txns if t.get("is_income") and t["amount"] < 0]
+    # Plaid income = negative amount (money arriving). Display as positive.
+    paychecks = [
+        {
+            "date":         t["date"],
+            "display_name": t["display_name"],
+            "amount":       round(abs(t["amount"]), 2),
+            "income_type":  t.get("income_type", "deposit"),
+        }
+        for t in income_txns
+        if t.get("income_type") == "paycheck"
+    ]
+    other_income = [
+        {
+            "date":         t["date"],
+            "display_name": t["display_name"],
+            "amount":       round(abs(t["amount"]), 2),
+            "income_type":  t.get("income_type", "deposit"),
+        }
+        for t in income_txns
+        if t.get("income_type") != "paycheck"
+    ]
+
+    monthly_income = round(sum(abs(t["amount"]) for t in income_txns), 2)
+    return {
+        "monthly_income": monthly_income,
+        "paycheck_count": len(paychecks),
+        "paychecks":      paychecks,
+        "other_income":   other_income,
+    }
+
+
 @app.get("/budget/summary")
 async def budget_summary(month: str = ""):
-    """Budget summary with spending by category for a month."""
+    """Budget summary with spending by category and income for a month."""
     txns = await _fetch_budget_transactions(month or None)
     import datetime as dt
     today = dt.date.today()
     display_month = month or today.strftime("%Y-%m")
 
-    spending   = [t for t in txns if not t["excluded_from_budget"] and t["amount"] > 0]
-    excluded   = [t for t in txns if t["excluded_from_budget"]]
+    spending      = [t for t in txns if not t["excluded_from_budget"] and t["amount"] > 0]
+    excluded      = [t for t in txns if t["excluded_from_budget"]]
     uncategorized = [t for t in spending if t["budget_category"] == "Other"]
 
     # Spending by category
@@ -934,17 +1155,27 @@ async def budget_summary(month: str = ""):
         by_cat[cat] = round(by_cat.get(cat, 0.0) + t["amount"], 2)
 
     total_spending = round(sum(by_cat.values()), 2)
+    income_data    = _build_income_summary(txns)
+    monthly_income = income_data["monthly_income"]
+    net_cash_flow  = round(monthly_income - total_spending, 2)
+    savings_rate   = round(net_cash_flow / monthly_income * 100, 1) if monthly_income > 0 else None
 
     return {
-        "month":              display_month,
-        "total_spending":     total_spending,
+        "month":                 display_month,
+        "total_spending":        total_spending,
+        "monthly_income":        monthly_income,
+        "paycheck_count":        income_data["paycheck_count"],
+        "paychecks":             income_data["paychecks"],
+        "other_income":          income_data["other_income"],
+        "net_cash_flow":         net_cash_flow,
+        "savings_rate":          savings_rate,
         "spending_by_category": [
             {"category": cat, "amount": amt}
             for cat, amt in sorted(by_cat.items(), key=lambda x: -x[1])
         ],
-        "uncategorized_count": len(uncategorized),
-        "excluded_count":      len(excluded),
-        "transaction_count":   len(txns),
+        "uncategorized_count":   len(uncategorized),
+        "excluded_count":        len(excluded),
+        "transaction_count":     len(txns),
         "spending_transactions": spending[:50],
     }
 
@@ -1188,23 +1419,31 @@ async def finance_summary():
     net_worth         = total_cash + total_investments - total_credit_debt - total_loans
 
     # ── current-month transactions ────────────────────────────────────────────
-    # monthly_spending = sum of positive (debit) transactions on DEPOSITORY accounts only,
-    # excluding pending and excluding Transfer/Payment categories.
-    # Rationale: credit card purchases appear on the credit account; counting them here
-    # would double-count with the depository payment. Transfer/Payment categories are
-    # balance moves (credit card payments, inter-account transfers), not real spending.
-    EXCLUDED_CATEGORIES = {"transfer", "payment", "credit card", "payroll", "interest"}
-
+    # Use the full classification engine (same as /budget/summary) so monthly_spending,
+    # monthly_income, and spending_by_category are always consistent.
     transactions = []
     monthly_spending = 0.0
-    today = dt.date.today()
+    monthly_income   = 0.0
+    spending_by_cat: dict[str, float] = {}
+    income_txns_for_summary: list[dict] = []
+    today      = dt.date.today()
     month_start = today.replace(day=1)
 
     try:
         from plaid.model.transactions_get_request import TransactionsGetRequest
         from plaid.model.transactions_get_request_options import TransactionsGetRequestOptions
+        from plaid.model.accounts_get_request import AccountsGetRequest as _AGetRequest
         for row in (rows or []):
             try:
+                # account_type map for income classification (depository vs credit)
+                acct_type_map: dict[str, str] = {}
+                try:
+                    ar = client.accounts_get(_AGetRequest(access_token=row["access_token"]))
+                    for a in ar["accounts"]:
+                        acct_type_map[a["account_id"]] = str(a.get("type", "")).lower()
+                except Exception:
+                    pass
+
                 resp = client.transactions_get(
                     TransactionsGetRequest(
                         access_token=row["access_token"],
@@ -1214,26 +1453,48 @@ async def finance_summary():
                     )
                 )
                 for t in resp["transactions"]:
-                    amt      = t["amount"]
-                    cat_raw  = t["category"][0] if t.get("category") else "Other"
-                    acct_id  = t["account_id"]
-                    pending  = t["pending"]
-                    txn = {
-                        "transaction_id": t["transaction_id"],
-                        "date":           str(t["date"]),
-                        "name":           t["name"],
-                        "amount":         amt,
-                        "category":       cat_raw,
-                        "account_id":     acct_id,
-                        "pending":        pending,
-                    }
-                    transactions.append(txn)
+                    pfc = ""
+                    try:
+                        pfc_obj = t.get("personal_finance_category")
+                        if pfc_obj:
+                            pfc = getattr(pfc_obj, "primary", "") or str(pfc_obj)
+                    except Exception:
+                        pass
 
-                    # Only count as spending: depository, positive, non-pending, non-transfer
-                    is_depository_txn  = acct_id in depository_ids
-                    is_excluded_cat    = cat_raw.lower() in EXCLUDED_CATEGORIES
-                    if amt > 0 and not pending and is_depository_txn and not is_excluded_cat:
-                        monthly_spending += amt
+                    acct_id   = t["account_id"]
+                    acct_type = acct_type_map.get(acct_id, "")
+                    cat_raw   = t["category"][0] if t.get("category") else "Other"
+                    amt       = float(t["amount"])
+
+                    txn = {
+                        "transaction_id":            t["transaction_id"],
+                        "date":                      str(t["date"]),
+                        "name":                      t["name"],
+                        "display_name":              _clean_display_name(t.get("name"), t.get("merchant_name")),
+                        "amount":                    amt,
+                        "category":                  cat_raw,
+                        "account_type":              acct_type,
+                        "personal_finance_category": pfc,
+                        "pending":                   bool(t["pending"]),
+                        # will be filled by _classify_transaction
+                        "is_income": False, "income_type": "",
+                        "excluded_from_budget": False, "exclusion_reason": "", "budget_category": "",
+                    }
+                    _classify_transaction(txn)
+
+                    # Strip internal fields before storing for the response
+                    safe_txn = {k: v for k, v in txn.items()
+                                if k not in ("account_type",)}
+                    transactions.append(safe_txn)
+
+                    if not txn["pending"]:
+                        if txn["is_income"] and amt < 0:
+                            monthly_income += abs(amt)
+                            income_txns_for_summary.append(txn)
+                        elif not txn["excluded_from_budget"] and amt > 0:
+                            monthly_spending += amt
+                            cat = txn["budget_category"] or "Other"
+                            spending_by_cat[cat] = round(spending_by_cat.get(cat, 0.0) + amt, 2)
             except Exception:
                 continue
     except Exception:
@@ -1241,13 +1502,14 @@ async def finance_summary():
 
     transactions.sort(key=lambda x: x["date"], reverse=True)
 
-    # Run categorization on the fetched transactions for spending_by_category in summary
-    spending_by_cat: dict[str, float] = {}
-    for t in transactions:
-        excluded, _ = _exclude_from_budget(t)
-        if not excluded and t["amount"] > 0:
-            cat = _assign_category(t)
-            spending_by_cat[cat] = round(spending_by_cat.get(cat, 0.0) + t["amount"], 2)
+    # Build safe income summary
+    paychecks = [
+        {"date": t["date"], "display_name": t["display_name"],
+         "amount": round(abs(t["amount"]), 2), "income_type": t.get("income_type", "paycheck")}
+        for t in income_txns_for_summary if t.get("income_type") == "paycheck"
+    ]
+    net_cash_flow = round(monthly_income - monthly_spending, 2)
+    savings_rate  = round(net_cash_flow / monthly_income * 100, 1) if monthly_income > 0 else None
 
     # Manual portfolio (Fidelity/Schwab fallback)
     manual_portfolio_value = 0.0
@@ -1286,6 +1548,11 @@ async def finance_summary():
         "total_loans":               round(total_loans, 2),
         "net_worth":                 round(net_worth + manual_portfolio_value, 2),
         "monthly_spending":          round(monthly_spending, 2),
+        "monthly_income":            round(monthly_income, 2),
+        "paycheck_count":            len(paychecks),
+        "paychecks":                 paychecks,
+        "net_cash_flow":             net_cash_flow,
+        "savings_rate":              savings_rate,
         "spending_by_category": [
             {"category": cat, "amount": amt}
             for cat, amt in sorted(spending_by_cat.items(), key=lambda x: -x[1])
