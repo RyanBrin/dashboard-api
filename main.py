@@ -162,15 +162,26 @@ async def bank_dashboard():
         const handler = Plaid.create({{
           token: data.link_token,
           onSuccess: async (public_token, metadata) => {{
-            document.getElementById('status').textContent = 'Linking account...';
-            const ex = await fetch(API + '/plaid/exchange_token', {{
-              method: 'POST',
-              headers: {{'Content-Type': 'application/json'}},
-              body: JSON.stringify({{public_token}})
-            }});
-            const exData = await ex.json();
-            document.getElementById('status').textContent = '✓ ' + (exData.institution || 'Account') + ' connected!';
-            loadData();
+            document.getElementById('status').textContent = 'Saving connection...';
+            try {{
+              const ex = await fetch(API + '/plaid/exchange_token', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{public_token}})
+              }});
+              if (!ex.ok) {{
+                const errData = await ex.json().catch(() => ({{}}));
+                throw new Error(errData.detail || 'Exchange failed (' + ex.status + ')');
+              }}
+              const exData = await ex.json();
+              if (!exData.ok) throw new Error('Exchange returned not-ok');
+              document.getElementById('status').textContent = '✓ ' + (exData.institution || 'Account') + ' connected!';
+              document.getElementById('connectBtn').disabled = false;
+              loadData();
+            }} catch(exErr) {{
+              document.getElementById('status').textContent = '✗ Could not save connection: ' + exErr.message;
+              document.getElementById('connectBtn').disabled = false;
+            }}
           }},
           onExit: (err) => {{
             document.getElementById('status').textContent = err ? 'Error: ' + err.display_message : '';
@@ -249,47 +260,65 @@ async def create_link_token():
         from plaid.model.country_code import CountryCode
 
         client = _plaid_client()
-        req = LinkTokenCreateRequest(
+
+        # redirect_uri required for OAuth institutions (Chase, BofA, Wells Fargo, etc.)
+        redirect_uri = os.getenv("PLAID_REDIRECT_URI", "")
+        kwargs: dict = dict(
             products=[Products("transactions")],
             additional_consented_products=[Products("investments")],
             client_name="Nexus",
             country_codes=[CountryCode("US")],
             language="en",
-            user=LinkTokenCreateRequestUser(client_user_id="ryan-dashboard"),
+            user=LinkTokenCreateRequestUser(client_user_id="ryan-nexus"),
         )
-        resp = client.link_token_create(req)
+        if redirect_uri:
+            kwargs["redirect_uri"] = redirect_uri
+
+        resp = client.link_token_create(LinkTokenCreateRequest(**kwargs))
+        import logging; logging.getLogger(__name__).info("Plaid link token created")
         return {"link_token": resp["link_token"]}
     except Exception as e:
+        import logging; logging.getLogger(__name__).error("Plaid link token creation failed: %s", type(e).__name__)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/plaid/exchange_token")
 async def exchange_token(body: ExchangeTokenBody):
+    import logging
+    log = logging.getLogger(__name__)
     try:
         from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchangeRequest
+        from plaid.model.item_get_request import ItemGetRequest
         from plaid.model.institutions_get_by_id_request import InstitutionsGetByIdRequest
         from plaid.model.country_code import CountryCode
 
+        log.info("Plaid token exchange started")
         client = _plaid_client()
+
         resp = client.item_public_token_exchange(
             ItemPublicTokenExchangeRequest(public_token=body.public_token)
         )
         access_token = resp["access_token"]
-        item_id = resp["item_id"]
+        item_id      = resp["item_id"]
+        log.info("Plaid token exchange complete — item stored")
 
-        # Try to get institution name
+        # Lookup institution name using proper SDK model (not a dict)
         institution_name = None
         try:
-            item_resp = client.item_get({"access_token": access_token})
-            inst_id = item_resp["item"]["institution_id"]
+            item_resp = client.item_get(ItemGetRequest(access_token=access_token))
+            inst_id = item_resp["item"].get("institution_id")
             if inst_id:
                 inst_resp = client.institutions_get_by_id(
-                    InstitutionsGetByIdRequest(institution_id=inst_id, country_codes=[CountryCode("US")])
+                    InstitutionsGetByIdRequest(
+                        institution_id=inst_id, country_codes=[CountryCode("US")]
+                    )
                 )
                 institution_name = inst_resp["institution"]["name"]
-        except Exception:
-            pass
+                log.info("Institution identified")
+        except Exception as inst_err:
+            log.warning("Could not look up institution name: %s", type(inst_err).__name__)
 
+        # Persist access token server-side — never returned to client
         pool = await get_pool()
         async with pool.acquire() as conn:
             await conn.execute(
@@ -298,8 +327,12 @@ async def exchange_token(body: ExchangeTokenBody):
                    ON CONFLICT (item_id) DO UPDATE SET access_token=$2, institution=$3""",
                 item_id, access_token, institution_name
             )
+        log.info("Plaid item saved to database. Institution: %s", institution_name or "unknown")
         return {"ok": True, "item_id": item_id, "institution": institution_name}
+
     except Exception as e:
+        import logging
+        logging.getLogger(__name__).error("Plaid exchange failed: %s", type(e).__name__)
         raise HTTPException(status_code=500, detail=str(e))
 
 
