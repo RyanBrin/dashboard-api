@@ -389,6 +389,110 @@ async def get_transactions(days: int = 30):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/finance/summary")
+async def finance_summary():
+    """Single aggregated finance summary for the Android Home screen.
+    Calculates totals from Plaid accounts and current-month transactions.
+    No Plaid tokens are returned — server-side only.
+    """
+    import datetime as dt
+
+    # ── accounts ─────────────────────────────────────────────────────────────
+    try:
+        from plaid.model.accounts_balance_get_request import AccountsBalanceGetRequest
+        client = _plaid_client()
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT access_token, institution FROM plaid_items")
+    except Exception:
+        rows = []
+
+    accounts = []
+    for row in (rows or []):
+        try:
+            resp = client.accounts_balance_get(
+                AccountsBalanceGetRequest(access_token=row["access_token"])
+            )
+            for acct in resp["accounts"]:
+                accounts.append({
+                    "account_id":        acct["account_id"],
+                    "name":              acct["name"],
+                    "official_name":     acct.get("official_name"),
+                    "type":              str(acct["type"]),
+                    "subtype":           str(acct.get("subtype", "")),
+                    "current_balance":   acct["balances"]["current"] or 0.0,
+                    "available_balance": acct["balances"]["available"],
+                    "currency":          acct["balances"].get("iso_currency_code", "USD"),
+                    "institution":       row["institution"],
+                })
+        except Exception:
+            continue
+
+    # ── categorise accounts ───────────────────────────────────────────────────
+    credit_cards = [a for a in accounts if a["type"] in ("credit",)]
+    depository   = [a for a in accounts if a["type"] in ("depository",)]
+    investment   = [a for a in accounts if a["type"] in ("investment", "brokerage")]
+    loans        = [a for a in accounts if a["type"] in ("loan",)]
+
+    total_cash          = sum(a["current_balance"] for a in depository)
+    total_credit_debt   = sum(a["current_balance"] for a in credit_cards)
+    total_investments   = sum(a["current_balance"] for a in investment)
+    net_worth           = total_cash + total_investments - total_credit_debt
+
+    # ── current-month transactions ────────────────────────────────────────────
+    transactions = []
+    monthly_spending = 0.0
+    today = dt.date.today()
+    month_start = today.replace(day=1)
+
+    try:
+        from plaid.model.transactions_get_request import TransactionsGetRequest
+        from plaid.model.transactions_get_request_options import TransactionsGetRequestOptions
+        for row in (rows or []):
+            try:
+                resp = client.transactions_get(
+                    TransactionsGetRequest(
+                        access_token=row["access_token"],
+                        start_date=month_start,
+                        end_date=today,
+                        options=TransactionsGetRequestOptions(count=250),
+                    )
+                )
+                for t in resp["transactions"]:
+                    amt = t["amount"]
+                    transactions.append({
+                        "transaction_id": t["transaction_id"],
+                        "date":    str(t["date"]),
+                        "name":    t["name"],
+                        "amount":  amt,
+                        "category": t["category"][0] if t.get("category") else "Other",
+                        "account_id": t["account_id"],
+                        "pending": t["pending"],
+                    })
+                    # Positive Plaid amount = debit (money out)
+                    if amt > 0 and not t["pending"]:
+                        monthly_spending += amt
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    transactions.sort(key=lambda x: x["date"], reverse=True)
+
+    return {
+        "total_cash":            round(total_cash, 2),
+        "total_credit_card_debt":round(total_credit_debt, 2),
+        "total_investments":     round(total_investments, 2),
+        "net_worth":             round(net_worth, 2),
+        "monthly_spending":      round(monthly_spending, 2),
+        "accounts":              accounts,
+        "credit_cards":          credit_cards,
+        "recent_transactions":   transactions[:25],
+        "has_connected_accounts":len(accounts) > 0,
+        "last_synced":           dt.datetime.utcnow().isoformat() + "Z",
+    }
+
+
 @app.get("/plaid/investments")
 async def get_investments():
     """Returns investment holdings — works with Fidelity, Schwab, etc."""
