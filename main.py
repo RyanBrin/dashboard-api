@@ -368,7 +368,10 @@ async def get_accounts():
         if not rows:
             return {"accounts": [], "message": "No accounts connected yet"}
 
+        import logging
+        log = logging.getLogger(__name__)
         all_accounts = []
+        errors = []
         for row in rows:
             try:
                 resp = client.accounts_balance_get(
@@ -386,9 +389,15 @@ async def get_accounts():
                         "currency":          acct["balances"].get("iso_currency_code", "USD"),
                         "institution":       row["institution"],
                     })
-            except Exception:
+                log.info("Fetched %d accounts from %s", len(resp["accounts"]), row["institution"])
+            except Exception as e:
+                err_type = type(e).__name__
+                err_msg = str(e)
+                log.error("Plaid balance fetch failed for %s: %s — %s", row["institution"], err_type, err_msg[:200])
+                errors.append({"institution": row["institution"], "error": err_type, "detail": err_msg[:200]})
                 continue
-        return {"accounts": all_accounts}
+        log.info("Total accounts fetched: %d, errors: %d", len(all_accounts), len(errors))
+        return {"accounts": all_accounts, "fetch_errors": errors if errors else None}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
