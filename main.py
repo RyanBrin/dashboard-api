@@ -619,6 +619,336 @@ async def get_transactions(days: int = 30):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Budget categorization engine ──────────────────────────────────────────────
+
+# Budget categories — aligned with BudgetGoalViewModel defaults in the Android app
+BUDGET_CATS = [
+    "Food / Drinks",
+    "Gas / Car",
+    "Shopping / Lifestyle",
+    "Apps / Subscriptions",
+    "Entertainment",
+    "Bills / Utilities",
+    "Gas / Car",
+    "Health",
+    "School",
+    "Income",
+    "Transfers / Unclear",
+    "Credit Card Payments",
+    "Other",
+]
+
+# Map Plaid personal_finance_category → budget category
+_PFC_MAP: dict[str, str] = {
+    "FOOD_AND_DRINK_RESTAURANTS":                 "Food / Drinks",
+    "FOOD_AND_DRINK_FAST_FOOD":                   "Food / Drinks",
+    "FOOD_AND_DRINK_COFFEE":                      "Food / Drinks",
+    "FOOD_AND_DRINK_GROCERIES":                   "Food / Drinks",
+    "FOOD_AND_DRINK_ALCOHOL_AND_BARS":            "Food / Drinks",
+    "FOOD_AND_DRINK_VENDING_MACHINES":            "Food / Drinks",
+    "FOOD_AND_DRINK_OTHER_FOOD_AND_DRINK":        "Food / Drinks",
+    "TRANSPORTATION_GAS":                         "Gas / Car",
+    "TRANSPORTATION_PARKING":                     "Gas / Car",
+    "TRANSPORTATION_TAXIS_AND_RIDESHARES":        "Gas / Car",
+    "TRANSPORTATION_PUBLIC_TRANSIT":              "Gas / Car",
+    "TRANSPORTATION_OTHER_TRANSPORTATION":        "Gas / Car",
+    "TRAVEL_FLIGHTS":                             "Gas / Car",
+    "TRAVEL_LODGING":                             "Entertainment",
+    "SHOPPING_GENERAL_MERCHANDISE":              "Shopping / Lifestyle",
+    "SHOPPING_CLOTHING_AND_ACCESSORIES":          "Shopping / Lifestyle",
+    "SHOPPING_SPORTING_GOODS":                   "Shopping / Lifestyle",
+    "SHOPPING_HOME_IMPROVEMENT":                 "Shopping / Lifestyle",
+    "SHOPPING_ELECTRONICS":                      "Tech / Best Buy",
+    "SHOPPING_GROCERIES":                        "Food / Drinks",
+    "SHOPPING_OTHER_SHOPPING":                   "Shopping / Lifestyle",
+    "ENTERTAINMENT_CASINOS_AND_GAMBLING":        "Entertainment",
+    "ENTERTAINMENT_MUSIC_AND_AUDIO":             "Apps / Subscriptions",
+    "ENTERTAINMENT_STREAMING_SERVICES":          "Apps / Subscriptions",
+    "ENTERTAINMENT_SPORTING_EVENTS":             "Entertainment",
+    "ENTERTAINMENT_TV_AND_MOVIES":               "Apps / Subscriptions",
+    "ENTERTAINMENT_VIDEO_GAMES":                 "Entertainment",
+    "ENTERTAINMENT_OTHER_ENTERTAINMENT":         "Entertainment",
+    "PERSONAL_CARE_GYMS_AND_FITNESS_CENTERS":    "Health",
+    "PERSONAL_CARE_HAIR_AND_BEAUTY":             "Shopping / Lifestyle",
+    "PERSONAL_CARE_OTHER_PERSONAL_CARE":         "Health",
+    "MEDICAL_DOCTOR_VISITS":                     "Health",
+    "MEDICAL_PHARMACIES_AND_SUPPLEMENTS":        "Health",
+    "MEDICAL_DENTAL_CARE":                       "Health",
+    "MEDICAL_EYE_CARE":                          "Health",
+    "MEDICAL_OTHER_MEDICAL":                     "Health",
+    "HOME_IMPROVEMENT_FURNITURES":               "Shopping / Lifestyle",
+    "HOME_IMPROVEMENT_HARDWARE":                 "Shopping / Lifestyle",
+    "GENERAL_SERVICES_AUTOMOTIVE":               "Gas / Car",
+    "GENERAL_SERVICES_SUBSCRIPTION":             "Apps / Subscriptions",
+    "GENERAL_SERVICES_INSURANCE":                "Bills / Utilities",
+    "GENERAL_SERVICES_EDUCATION":                "School",
+    "RENT_AND_UTILITIES_RENT":                   "Bills / Utilities",
+    "RENT_AND_UTILITIES_UTILITIES":              "Bills / Utilities",
+    "RENT_AND_UTILITIES_INTERNET_AND_CABLE":     "Bills / Utilities",
+    "RENT_AND_UTILITIES_TELEPHONE":              "Bills / Utilities",
+    "RENT_AND_UTILITIES_GAS_AND_ELECTRICITY":    "Bills / Utilities",
+    "INCOME_PAYROLL":                            "Income",
+    "INCOME_DIVIDENDS":                          "Income",
+    "INCOME_OTHER_INCOME":                       "Income",
+    "TRANSFER_IN_ACCOUNT_TRANSFER":              "Transfers / Unclear",
+    "TRANSFER_OUT_ACCOUNT_TRANSFER":             "Transfers / Unclear",
+    "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT":         "Credit Card Payments",
+    "LOAN_PAYMENTS_MORTGAGE_PAYMENT":            "Bills / Utilities",
+    "LOAN_PAYMENTS_CAR_PAYMENT":                 "Gas / Car",
+    "LOAN_PAYMENTS_STUDENT_LOAN_PAYMENT":        "School",
+}
+
+# Map Plaid legacy category[0] → budget category
+_LEGACY_CAT_MAP: dict[str, str] = {
+    "food and drink":        "Food / Drinks",
+    "restaurants":           "Food / Drinks",
+    "fast food":             "Food / Drinks",
+    "coffee shop":           "Food / Drinks",
+    "groceries":             "Food / Drinks",
+    "travel":                "Gas / Car",
+    "gas stations":          "Gas / Car",
+    "taxi":                  "Gas / Car",
+    "ride share":            "Gas / Car",
+    "shops":                 "Shopping / Lifestyle",
+    "supermarkets":          "Food / Drinks",
+    "clothing":              "Shopping / Lifestyle",
+    "electronics":           "Shopping / Lifestyle",
+    "sporting goods":        "Shopping / Lifestyle",
+    "service":               "Bills / Utilities",
+    "internet services":     "Apps / Subscriptions",
+    "subscription":          "Apps / Subscriptions",
+    "gyms and fitness":      "Health",
+    "healthcare":            "Health",
+    "medical":               "Health",
+    "insurance":             "Bills / Utilities",
+    "utilities":             "Bills / Utilities",
+    "telecom":               "Bills / Utilities",
+    "entertainment":         "Entertainment",
+    "music":                 "Apps / Subscriptions",
+    "video streaming":       "Apps / Subscriptions",
+    "video games":           "Entertainment",
+    "education":             "School",
+    "payroll":               "Income",
+    "deposit":               "Income",
+    "transfer":              "Transfers / Unclear",
+    "payment":               "Credit Card Payments",
+    "credit card":           "Credit Card Payments",
+    "automotive":            "Gas / Car",
+}
+
+# Merchant keyword → budget category (applied to lowercased name/merchant)
+_KEYWORD_RULES: list[tuple[list[str], str]] = [
+    (["mcdonald", "taco bell", "subway", "chipotle", "wendy", "burger king",
+      "doordash", "grubhub", "ubereats", "domino", "pizza", "sushi",
+      "restaurant", "cafe", "diner", "kitchen", "grill", "steakhouse",
+      "qdoba", "panda express", "arby", "popeyes", "chick-fil"],   "Food / Drinks"),
+    (["hy-vee", "hy vee", "hyvee", "walmart grocery", "kroger", "safeway",
+      "whole foods", "trader joe", "aldi", "sam's club", "costco"],  "Food / Drinks"),
+    (["starbucks", "dunkin", "caribou", "dutch bros"],               "Food / Drinks"),
+    (["shell", "exxon", "bp gas", "casey's", "cenex", "holiday gas",
+      "kwik trip", "kwiktrip", "kum & go", "speedway", "marathon",
+      "chevron", "pilot", "loves travel"],                           "Gas / Car"),
+    (["uber", "lyft", "taxi"],                                        "Gas / Car"),
+    (["best buy", "newegg", "micro center", "b&h photo",
+      "apple store", "samsung"],                                      "Tech / Best Buy"),
+    (["amazon", "amazon.com", "amazon prime"],                       "Shopping / Lifestyle"),
+    (["walmart", "target", "home depot", "lowe's",
+      "costco", "sam's", "tj maxx", "ross", "marshalls"],           "Shopping / Lifestyle"),
+    (["spotify", "apple music", "youtube premium", "pandora",
+      "netflix", "hulu", "disney+", "paramount", "peacock",
+      "apple.com", "google play", "discord", "adobe",
+      "microsoft 365", "dropbox", "icloud"],                        "Apps / Subscriptions"),
+    (["geico", "state farm", "progressive", "allstate",
+      "usaa insurance", "nationwide"],                               "Bills / Utilities"),
+    (["xfinity", "comcast", "at&t", "verizon", "t-mobile",
+      "dish network", "centurylink", "spectrum", "directv",
+      "midco", "midcontinent"],                                      "Bills / Utilities"),
+    (["electric", "water bill", "gas bill", "xcel energy",
+      "otter tail", "excel energy"],                                 "Bills / Utilities"),
+    (["jiffy lube", "valvoline", "o'reilly", "autozone",
+      "napa auto", "firestone", "midas", "car wash",
+      "auto parts", "meineke"],                                      "Gas / Car"),
+    (["cvs", "walgreens", "rite aid", "pharmacy", "clinic",
+      "hospital", "dental", "optometrist", "urgent care",
+      "doctor", "medical"],                                          "Health"),
+    (["planet fitness", "anytime fitness", "ymca", "gym"],           "Health"),
+    (["university", "college", "tuition", "student loan",
+      "navient", "great lakes", "edfinancial"],                     "School"),
+]
+
+def _exclude_from_budget(txn: dict) -> tuple[bool, str]:
+    """Returns (should_exclude, reason).
+    Excludes: income, transfers, credit card payments, pending."""
+    if txn.get("pending"):
+        return True, "pending"
+    pfc  = (txn.get("personal_finance_category") or "").upper()
+    cat  = (txn.get("category") or "").lower()
+    name = (txn.get("name") or "").lower()
+
+    if any(k in pfc for k in ("INCOME", "PAYROLL", "DIVIDEND")):
+        return True, "income"
+    if "payroll" in cat or "income" in name:
+        return True, "income"
+    if any(k in pfc for k in ("TRANSFER_IN", "TRANSFER_OUT", "ACCOUNT_TRANSFER")):
+        return True, "transfer"
+    if "transfer" in cat or "zelle" in name or "venmo" in name:
+        return True, "transfer"
+    if "CREDIT_CARD_PAYMENT" in pfc or "LOAN_PAYMENTS_CREDIT_CARD" in pfc:
+        return True, "credit_card_payment"
+    if "payment" in cat and "credit" in name:
+        return True, "credit_card_payment"
+    return False, ""
+
+
+def _assign_category(txn: dict) -> str:
+    """Assign a budget category to a transaction using PFC → legacy → keyword rules."""
+    pfc   = (txn.get("personal_finance_category") or "").upper().replace(" ", "_")
+    cat   = (txn.get("category") or "").lower()
+    name  = ((txn.get("merchant_name") or txn.get("name") or "")).lower()
+
+    # 1. Plaid personal_finance_category (most specific)
+    for key, budget_cat in _PFC_MAP.items():
+        if key in pfc:
+            return budget_cat
+
+    # 2. Plaid legacy category
+    for key, budget_cat in _LEGACY_CAT_MAP.items():
+        if key in cat:
+            return budget_cat
+
+    # 3. Merchant keyword rules
+    for keywords, budget_cat in _KEYWORD_RULES:
+        if any(kw in name for kw in keywords):
+            return budget_cat
+
+    return "Other"
+
+
+def _clean_display_name(name: str | None, merchant: str | None) -> str:
+    """Return a clean display name — prefer merchant_name, clean raw bank strings."""
+    if merchant:
+        return merchant.strip()
+    if not name:
+        return "Unknown"
+    import re
+    cleaned = re.sub(r'^[A-Z]{2,4}\d+\s+', '', name)   # XX3698 prefix
+    cleaned = re.sub(r'\bPOS\s+PURCHASE\b', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\bPOS\s+DEBIT\b',    '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\bCHECK\s+CARD\b',   '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\b\d{2}/\d{2}\s+\d{2}:\d{2}\b', '', cleaned)
+    return re.sub(r'\s{2,}', ' ', cleaned).strip() or name.strip()
+
+
+async def _fetch_budget_transactions(month: str | None = None) -> list[dict]:
+    """Fetch and categorize transactions for a given month (YYYY-MM) or current month."""
+    import datetime as dt
+    from plaid.model.transactions_get_request import TransactionsGetRequest
+    from plaid.model.transactions_get_request_options import TransactionsGetRequestOptions
+
+    today = dt.date.today()
+    if month:
+        year, mon = int(month[:4]), int(month[5:7])
+        start = dt.date(year, mon, 1)
+        # Last day of month
+        if mon == 12:
+            end = dt.date(year + 1, 1, 1) - dt.timedelta(days=1)
+        else:
+            end = dt.date(year, mon + 1, 1) - dt.timedelta(days=1)
+        end = min(end, today)
+    else:
+        start = today.replace(day=1)
+        end   = today
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT access_token FROM plaid_items")
+    if not rows:
+        return []
+
+    client = _plaid_client()
+    all_txns: list[dict] = []
+    for row in rows:
+        try:
+            resp = client.transactions_get(
+                TransactionsGetRequest(
+                    access_token=row["access_token"],
+                    start_date=start,
+                    end_date=end,
+                    options=TransactionsGetRequestOptions(count=500),
+                )
+            )
+            for t in resp["transactions"]:
+                pfc = ""
+                try:
+                    pfc_obj = t.get("personal_finance_category")
+                    if pfc_obj:
+                        pfc = getattr(pfc_obj, "primary", "") or str(pfc_obj)
+                except Exception:
+                    pass
+                txn = {
+                    "transaction_id":            t["transaction_id"],
+                    "date":                      str(t["date"]),
+                    "display_name":              _clean_display_name(t.get("name"), t.get("merchant_name")),
+                    "raw_name":                  t.get("name", ""),
+                    "amount":                    float(t["amount"]),
+                    "account_id":                t["account_id"],
+                    "plaid_category":            t["category"][0] if t.get("category") else "",
+                    "personal_finance_category": pfc,
+                    "pending":                   bool(t["pending"]),
+                }
+                excluded, reason = _exclude_from_budget(txn)
+                txn["excluded_from_budget"] = excluded
+                txn["exclusion_reason"]     = reason
+                txn["budget_category"]      = "" if excluded else _assign_category(txn)
+                all_txns.append(txn)
+        except Exception:
+            continue
+
+    all_txns.sort(key=lambda x: x["date"], reverse=True)
+    return all_txns
+
+
+@app.get("/budget/transactions")
+async def budget_transactions(month: str = ""):
+    """Categorized transactions for a month. month=YYYY-MM, default=current month."""
+    txns = await _fetch_budget_transactions(month or None)
+    return {"transactions": txns, "count": len(txns), "month": month or "current"}
+
+
+@app.get("/budget/summary")
+async def budget_summary(month: str = ""):
+    """Budget summary with spending by category for a month."""
+    txns = await _fetch_budget_transactions(month or None)
+    import datetime as dt
+    today = dt.date.today()
+    display_month = month or today.strftime("%Y-%m")
+
+    spending   = [t for t in txns if not t["excluded_from_budget"] and t["amount"] > 0]
+    excluded   = [t for t in txns if t["excluded_from_budget"]]
+    uncategorized = [t for t in spending if t["budget_category"] == "Other"]
+
+    # Spending by category
+    by_cat: dict[str, float] = {}
+    for t in spending:
+        cat = t["budget_category"]
+        by_cat[cat] = round(by_cat.get(cat, 0.0) + t["amount"], 2)
+
+    total_spending = round(sum(by_cat.values()), 2)
+
+    return {
+        "month":              display_month,
+        "total_spending":     total_spending,
+        "spending_by_category": [
+            {"category": cat, "amount": amt}
+            for cat, amt in sorted(by_cat.items(), key=lambda x: -x[1])
+        ],
+        "uncategorized_count": len(uncategorized),
+        "excluded_count":      len(excluded),
+        "transaction_count":   len(txns),
+        "spending_transactions": spending[:50],
+    }
+
+
 # ── Portfolio (manual — Fidelity/Schwab fallback) ─────────────────────────────
 
 from typing import Optional, List
@@ -911,6 +1241,14 @@ async def finance_summary():
 
     transactions.sort(key=lambda x: x["date"], reverse=True)
 
+    # Run categorization on the fetched transactions for spending_by_category in summary
+    spending_by_cat: dict[str, float] = {}
+    for t in transactions:
+        excluded, _ = _exclude_from_budget(t)
+        if not excluded and t["amount"] > 0:
+            cat = _assign_category(t)
+            spending_by_cat[cat] = round(spending_by_cat.get(cat, 0.0) + t["amount"], 2)
+
     # Manual portfolio (Fidelity/Schwab fallback)
     manual_portfolio_value = 0.0
     manual_portfolio_accounts: list = []
@@ -948,6 +1286,10 @@ async def finance_summary():
         "total_loans":               round(total_loans, 2),
         "net_worth":                 round(net_worth + manual_portfolio_value, 2),
         "monthly_spending":          round(monthly_spending, 2),
+        "spending_by_category": [
+            {"category": cat, "amount": amt}
+            for cat, amt in sorted(spending_by_cat.items(), key=lambda x: -x[1])
+        ],
         "accounts":                  accounts,
         "credit_cards":              credit_cards,
         "manual_portfolio_accounts": manual_portfolio_accounts,
