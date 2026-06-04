@@ -95,61 +95,125 @@ async def bank_dashboard():
   <title>Nexus · Banking</title>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
   <style>
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #080F1A; color: #e2e8f0; padding: 24px; }}
-    h1 {{ font-size: 1.5rem; font-weight: 800; color: #f8fafc; margin-bottom: 4px; }}
-    .sub {{ color: #475569; font-size: 0.85rem; margin-bottom: 24px; }}
-    .btn {{ background: #0AAAFF; color: #080F1A; border: none; padding: 10px 20px; border-radius: 8px; font-size: 0.9rem; font-weight: 600; cursor: pointer; }}
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #080F1A; color: #e2e8f0;
+      padding: 16px; max-width: 680px; margin: 0 auto;
+    }}
+    h1 {{ font-size: 1.4rem; font-weight: 800; color: #f8fafc; margin-bottom: 4px; }}
+    .sub {{ color: #475569; font-size: 0.82rem; margin-bottom: 20px; }}
+    .btn {{ background: #0AAAFF; color: #080F1A; border: none; padding: 9px 18px;
+            border-radius: 8px; font-size: 0.88rem; font-weight: 600; cursor: pointer;
+            white-space: nowrap; flex-shrink: 0; }}
     .btn:hover {{ background: #2563eb; }}
-    .btn:disabled {{ background: #334155; cursor: not-allowed; }}
-    .section {{ background: #111827; border: 1px solid #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 16px; }}
-    .section h2 {{ font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: .07em; margin-bottom: 14px; }}
-    .account {{ display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #1e293b; }}
+    .btn:disabled {{ background: #334155; color: #64748b; cursor: not-allowed; }}
+    .btn-secondary {{ background: #1e293b; color: #94a3b8; }}
+    .btn-secondary:hover {{ background: #273548; color: #e2e8f0; }}
+    .actions {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; }}
+    #status {{ color: #94a3b8; font-size: 0.82rem; min-height: 1.2em; }}
+    .section {{ background: #111827; border: 1px solid #1e293b; border-radius: 12px;
+                padding: 16px; margin-bottom: 14px; overflow: hidden; }}
+    .section-title {{ font-size: 0.72rem; font-weight: 700; color: #64748b;
+                      text-transform: uppercase; letter-spacing: .07em; margin-bottom: 12px; }}
+    .group-label {{ font-size: 0.68rem; font-weight: 700; color: #475569;
+                    text-transform: uppercase; letter-spacing: .06em;
+                    padding: 8px 0 4px; margin-top: 4px; }}
+    /* Account row — flex with min-width:0 prevents overflow */
+    .account {{ display: flex; align-items: center; justify-content: space-between;
+                gap: 12px; padding: 9px 0; border-bottom: 1px solid #1e293b; }}
     .account:last-child {{ border-bottom: none; }}
-    .acct-name {{ font-size: 0.9rem; font-weight: 600; }}
-    .acct-sub {{ font-size: 0.75rem; color: #64748b; margin-top: 2px; }}
-    .acct-bal {{ font-size: 1rem; font-weight: 700; color: #0AAAFF; }}
-    .txn {{ display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #0f172a; font-size: 0.85rem; }}
+    .acct-info {{ min-width: 0; flex: 1; }}
+    .acct-name {{ font-size: 0.88rem; font-weight: 600; white-space: nowrap;
+                  overflow: hidden; text-overflow: ellipsis; }}
+    .acct-sub {{ font-size: 0.72rem; color: #64748b; margin-top: 2px; }}
+    .acct-bal {{ font-size: 0.95rem; font-weight: 700; white-space: nowrap; flex-shrink: 0; }}
+    .bal-asset {{ color: #0AAAFF; }}
+    .bal-debt  {{ color: #f87171; }}
+    /* Summary rows */
+    .summary-row {{ display: flex; justify-content: space-between; align-items: center;
+                    padding: 7px 0; border-top: 1px solid #1e293b; margin-top: 4px; }}
+    .summary-label {{ font-size: 0.8rem; color: #64748b; }}
+    .summary-val   {{ font-size: 1rem; font-weight: 800; color: #f8fafc; }}
+    .summary-val.green {{ color: #4ade80; }}
+    .summary-val.red   {{ color: #f87171; }}
+    .summary-val.blue  {{ color: #0AAAFF; }}
+    /* Transaction row — two-column, no overflow */
+    .txn {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 9px 0;
+      border-bottom: 1px solid #0f172a;
+    }}
     .txn:last-child {{ border-bottom: none; }}
-    .txn-name {{ color: #cbd5e1; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-    .txn-meta {{ color: #475569; font-size: 0.75rem; }}
-    .debit {{ color: #f87171; font-weight: 600; }}
-    .credit {{ color: #4ade80; font-weight: 600; }}
-    #status {{ color: #94a3b8; font-size: 0.85rem; margin-top: 10px; }}
-    .env-badge {{ display: inline-block; background: {'#1e3a5f' if env == 'sandbox' else '#1a2e1a'}; color: {'#60a5fa' if env == 'sandbox' else '#4ade80'}; font-size: 0.72rem; font-weight: 700; padding: 3px 8px; border-radius: 10px; margin-left: 8px; text-transform: uppercase; }}
-    .total {{ font-size: 1.2rem; font-weight: 800; color: #f8fafc; }}
+    .txn-left {{ min-width: 0; }}
+    .txn-name {{
+      font-size: 0.85rem; color: #cbd5e1; font-weight: 500;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }}
+    .txn-meta {{ font-size: 0.72rem; color: #475569; margin-top: 2px;
+                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+    .txn-amt {{ font-size: 0.88rem; font-weight: 700; white-space: nowrap; text-align: right; }}
+    .debit  {{ color: #f87171; }}
+    .credit {{ color: #4ade80; }}
+    .env-badge {{
+      display: inline-block;
+      background: {'#1e3a5f' if env == 'sandbox' else '#1a2e1a'};
+      color: {'#60a5fa' if env == 'sandbox' else '#4ade80'};
+      font-size: 0.68rem; font-weight: 700; padding: 2px 7px;
+      border-radius: 8px; margin-left: 8px; text-transform: uppercase;
+    }}
+    .pending {{ font-size: 0.65rem; color: #64748b; margin-left: 4px; }}
+    @media (max-width: 480px) {{
+      body {{ padding: 12px; }}
+      .section {{ padding: 12px; }}
+    }}
   </style>
 </head>
 <body>
-  <h1>Nexus <span style="color:#475569;font-weight:400;font-size:0.9rem">/ banking</span> <span class="env-badge">{env}</span></h1>
-  <p class="sub">Connect your bank to see live balances and transactions.</p>
+  <h1>Nexus <span style="color:#475569;font-weight:400;font-size:0.88rem">/ banking</span>
+      <span class="env-badge">{env}</span></h1>
+  <p class="sub">Your connected accounts and recent transactions.</p>
 
-  <div style="margin-bottom:20px; display:flex; gap:10px; align-items:center;">
-    <button class="btn" id="connectBtn" onclick="connectBank()">Connect Bank</button>
-    <button class="btn" id="refreshBtn" onclick="loadData()" style="background:#1e293b">Refresh</button>
+  <div class="actions">
+    <button class="btn" id="connectBtn" onclick="connectBank()">+ Connect Bank</button>
+    <button class="btn btn-secondary" id="refreshBtn" onclick="loadData()">Refresh</button>
     <span id="status"></span>
   </div>
 
   <div id="accountsSection" style="display:none">
     <div class="section">
-      <h2>Accounts</h2>
+      <div class="section-title">Accounts</div>
       <div id="accounts"></div>
-      <div style="margin-top:12px; padding-top:12px; border-top:1px solid #1e293b; display:flex; justify-content:space-between;">
-        <span style="color:#64748b">Total balance</span>
-        <span class="total" id="totalBal">—</span>
-      </div>
+      <div id="summaryRows"></div>
     </div>
   </div>
 
   <div id="txnSection" style="display:none">
     <div class="section">
-      <h2>Recent Transactions (30 days)</h2>
+      <div class="section-title">Recent Transactions <span style="color:#334155;font-weight:400">(30 days)</span></div>
       <div id="transactions"></div>
     </div>
   </div>
 
   <script>
     const API = '';
+    const usd = n => '$' + Math.abs(n).toLocaleString('en-US', {{minimumFractionDigits:2, maximumFractionDigits:2}});
+
+    // Clean raw bank transaction names for display
+    function cleanName(raw) {{
+      if (!raw) return 'Unknown';
+      return raw
+        .replace(/^[A-Z]{{2,4}}\\d+\\s+/g, '')      // remove card prefix like XX3698
+        .replace(/\\bPOS\\s+PURCHASE\\b/gi, '')       // remove POS PURCHASE
+        .replace(/\\bPOS\\s+DEBIT\\b/gi, '')          // remove POS DEBIT
+        .replace(/\\bCHECK\\s+CARD\\b/gi, '')
+        .replace(/\\b\\d{{2}}\\/\\d{{2}}\\s+\\d{{2}}:\\d{{2}}\\b/g, '') // remove 06/02 08:49
+        .replace(/\\s{{2,}}/g, ' ')
+        .trim() || raw.trim();
+    }}
 
     async function connectBank() {{
       document.getElementById('status').textContent = 'Getting link token...';
@@ -180,7 +244,6 @@ async def bank_dashboard():
               if (!ex.ok) {{
                 const errData = await ex.json().catch(() => ({{}}));
                 const raw = errData.detail || '';
-                // Translate common Plaid errors into human-readable messages
                 let msg = 'Could not save connection. Try again.';
                 if (raw.includes('redirect_uri') || raw.includes('INVALID_REDIRECT_URI'))
                   msg = 'OAuth redirect URI not configured. Check Plaid dashboard settings.';
@@ -203,13 +266,13 @@ async def bank_dashboard():
             }}
           }},
           onExit: (err) => {{
-            document.getElementById('status').textContent = err ? 'Error: ' + err.display_message : '';
+            document.getElementById('status').textContent = err ? err.display_message || '' : '';
             document.getElementById('connectBtn').disabled = false;
           }}
         }});
         handler.open();
       }} catch(e) {{
-        document.getElementById('status').textContent = 'Error: ' + e.message;
+        document.getElementById('status').textContent = '✗ ' + e.message;
         document.getElementById('connectBtn').disabled = false;
       }}
     }}
@@ -221,8 +284,7 @@ async def bank_dashboard():
           fetch(API + '/plaid/accounts').then(r => r.json()),
           fetch(API + '/plaid/transactions?days=30').then(r => r.json())
         ]);
-
-        const accounts = acctR.accounts || [];
+        const accounts     = acctR.accounts || [];
         const transactions = txnR.transactions || [];
 
         if (accounts.length === 0) {{
@@ -230,38 +292,94 @@ async def bank_dashboard():
           return;
         }}
 
-        // Render accounts
-        let total = 0;
-        document.getElementById('accounts').innerHTML = accounts.map(a => {{
-          const bal = a.current_balance || 0;
-          total += bal;
-          return `<div class="account">
-            <div><div class="acct-name">${{a.name}}</div><div class="acct-sub">${{a.institution || ''}} · ${{a.type}} · ${{a.subtype}}</div></div>
-            <div class="acct-bal">$${{bal.toLocaleString('en-US', {{minimumFractionDigits:2, maximumFractionDigits:2}})}}</div>
+        // ── Group accounts ────────────────────────────────────────────────
+        const groups = {{
+          depository: accounts.filter(a => a.type === 'depository'),
+          credit:     accounts.filter(a => a.type === 'credit'),
+          investment: accounts.filter(a => a.type === 'investment'),
+          loan:       accounts.filter(a => a.type === 'loan'),
+          other:      accounts.filter(a => !['depository','credit','investment','loan'].includes(a.type)),
+        }};
+
+        const groupTitles = {{
+          depository: 'Cash Accounts',
+          credit:     'Credit Cards',
+          investment: 'Investments',
+          loan:       'Loans',
+          other:      'Other',
+        }};
+
+        let html = '';
+        let cashTotal = 0, creditTotal = 0, investTotal = 0, loanTotal = 0;
+
+        for (const [key, list] of Object.entries(groups)) {{
+          if (!list.length) continue;
+          html += `<div class="group-label">${{groupTitles[key]}}</div>`;
+          list.forEach(a => {{
+            const bal = a.current_balance || 0;
+            const isDebt = key === 'credit' || key === 'loan';
+            const balClass = isDebt ? 'bal-debt' : 'bal-asset';
+            const balLabel = isDebt ? usd(bal) : usd(bal);
+            if (key === 'depository') cashTotal   += bal;
+            if (key === 'credit')     creditTotal += bal;
+            if (key === 'investment') investTotal += bal;
+            if (key === 'loan')       loanTotal   += bal;
+            html += `<div class="account">
+              <div class="acct-info">
+                <div class="acct-name">${{a.name}}</div>
+                <div class="acct-sub">${{a.institution || ''}}${{a.subtype ? ' · ' + a.subtype : ''}}</div>
+              </div>
+              <div class="acct-bal ${{balClass}}">${{isDebt ? '-' : ''}}${{balLabel}}</div>
+            </div>`;
+          }});
+        }}
+
+        document.getElementById('accounts').innerHTML = html;
+
+        // ── Summary rows ──────────────────────────────────────────────────
+        const netWorth = cashTotal + investTotal - creditTotal - loanTotal;
+        let sumHtml = '';
+        if (cashTotal   > 0) sumHtml += `<div class="summary-row"><span class="summary-label">Cash</span><span class="summary-val blue">${{usd(cashTotal)}}</span></div>`;
+        if (creditTotal > 0) sumHtml += `<div class="summary-row"><span class="summary-label">Credit card debt</span><span class="summary-val red">-${{usd(creditTotal)}}</span></div>`;
+        if (investTotal > 0) sumHtml += `<div class="summary-row"><span class="summary-label">Investments</span><span class="summary-val blue">${{usd(investTotal)}}</span></div>`;
+        if (loanTotal   > 0) sumHtml += `<div class="summary-row"><span class="summary-label">Loans</span><span class="summary-val red">-${{usd(loanTotal)}}</span></div>`;
+        if (cashTotal + investTotal + creditTotal + loanTotal > 0) {{
+          const nwColor = netWorth >= 0 ? 'green' : 'red';
+          const nwSign  = netWorth < 0 ? '-' : '';
+          sumHtml += `<div class="summary-row" style="border-top:1px solid #334155;margin-top:6px;padding-top:10px">
+            <span class="summary-label" style="font-weight:700;color:#94a3b8">Net worth</span>
+            <span class="summary-val ${{nwColor}}">${{nwSign}}${{usd(Math.abs(netWorth))}}</span>
           </div>`;
-        }}).join('');
-        document.getElementById('totalBal').textContent = '$' + total.toLocaleString('en-US', {{minimumFractionDigits:2}});
+        }}
+        document.getElementById('summaryRows').innerHTML = sumHtml;
         document.getElementById('accountsSection').style.display = 'block';
 
-        // Render transactions
-        document.getElementById('transactions').innerHTML = transactions.slice(0,50).map(t => {{
-          const amt = t.amount;
-          const cls = amt > 0 ? 'debit' : 'credit';
-          const sign = amt > 0 ? '-' : '+';
-          return `<div class="txn">
-            <div><div class="txn-name">${{t.name}}</div><div class="txn-meta">${{t.category}} · ${{t.date}}</div></div>
-            <span class="${{cls}}">${{sign}}$${{Math.abs(amt).toLocaleString('en-US', {{minimumFractionDigits:2}})}}</span>
-          </div>`;
-        }}).join('');
-        document.getElementById('txnSection').style.display = 'block';
+        // ── Transactions ──────────────────────────────────────────────────
+        if (transactions.length > 0) {{
+          document.getElementById('transactions').innerHTML = transactions.slice(0,50).map(t => {{
+            const amt     = t.amount;
+            const isDebit = amt > 0;
+            const display = cleanName(t.merchant_name || t.name || '');
+            const amtStr  = (isDebit ? '-' : '+') + usd(amt);
+            const pending = t.pending ? '<span class="pending">pending</span>' : '';
+            return `<div class="txn">
+              <div class="txn-left">
+                <div class="txn-name">${{display}}${{pending}}</div>
+                <div class="txn-meta">${{t.category || 'Other'}} · ${{t.date}}</div>
+              </div>
+              <div class="txn-amt ${{isDebit ? 'debit' : 'credit'}}">${{amtStr}}</div>
+            </div>`;
+          }}).join('');
+          document.getElementById('txnSection').style.display = 'block';
+        }}
+
         document.getElementById('connectBtn').disabled = false;
         document.getElementById('status').textContent = '';
       }} catch(e) {{
-        document.getElementById('status').textContent = 'Error: ' + e.message;
+        document.getElementById('status').textContent = '✗ ' + e.message;
       }}
     }}
 
-    // Auto-load on page open
     loadData();
   </script>
 </body>
