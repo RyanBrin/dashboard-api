@@ -2,7 +2,7 @@
 
 > Personal banking and investment data backend — part of the Nexus ecosystem.
 
-[![Live](https://img.shields.io/badge/deployed-Railway-6366f1?style=flat-square)](https://dashboard-api-production-ebee.up.railway.app)
+![deployed](https://img.shields.io/badge/deployed-Railway-6366f1?style=flat-square)
 [![Python](https://img.shields.io/badge/python-3.11+-3b82f6?style=flat-square)](https://python.org)
 
 ---
@@ -85,7 +85,7 @@ uvicorn main:app --reload
 
 Deployed on **Railway** with automatic deploys from the `main` branch.
 
-**Live:** [dashboard-api-production-ebee.up.railway.app](https://dashboard-api-production-ebee.up.railway.app)
+**Live:** [private]
 
 > **Note:** Plaid production approval is pending. Currently running in sandbox mode with test credentials.
 
