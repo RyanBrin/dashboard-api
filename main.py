@@ -431,15 +431,32 @@ async def finance_summary():
     # ── categorise accounts ───────────────────────────────────────────────────
     credit_cards = [a for a in accounts if a["type"] in ("credit",)]
     depository   = [a for a in accounts if a["type"] in ("depository",)]
-    investment   = [a for a in accounts if a["type"] in ("investment", "brokerage")]
+    investment   = [a for a in accounts if a["type"] in ("investment",)]
     loans        = [a for a in accounts if a["type"] in ("loan",)]
 
-    total_cash          = sum(a["current_balance"] for a in depository)
-    total_credit_debt   = sum(a["current_balance"] for a in credit_cards)
-    total_investments   = sum(a["current_balance"] for a in investment)
-    net_worth           = total_cash + total_investments - total_credit_debt
+    # Build a set of depository account IDs for spending filter below
+    depository_ids = {a["account_id"] for a in depository}
+
+    # Definitions:
+    # total_cash          = sum of depository (checking/savings) current balances
+    # total_credit_debt   = sum of credit card current balances (what is owed, a positive number)
+    # total_investments   = sum of investment account balances
+    # total_loans         = sum of loan balances (mortgages, auto, student)
+    # net_worth           = cash + investments − credit_debt − loans
+    total_cash        = sum(a["current_balance"] for a in depository)
+    total_credit_debt = sum(a["current_balance"] for a in credit_cards)
+    total_investments = sum(a["current_balance"] for a in investment)
+    total_loans       = sum(a["current_balance"] for a in loans)
+    net_worth         = total_cash + total_investments - total_credit_debt - total_loans
 
     # ── current-month transactions ────────────────────────────────────────────
+    # monthly_spending = sum of positive (debit) transactions on DEPOSITORY accounts only,
+    # excluding pending and excluding Transfer/Payment categories.
+    # Rationale: credit card purchases appear on the credit account; counting them here
+    # would double-count with the depository payment. Transfer/Payment categories are
+    # balance moves (credit card payments, inter-account transfers), not real spending.
+    EXCLUDED_CATEGORIES = {"transfer", "payment", "credit card", "payroll", "interest"}
+
     transactions = []
     monthly_spending = 0.0
     today = dt.date.today()
@@ -459,18 +476,25 @@ async def finance_summary():
                     )
                 )
                 for t in resp["transactions"]:
-                    amt = t["amount"]
-                    transactions.append({
+                    amt      = t["amount"]
+                    cat_raw  = t["category"][0] if t.get("category") else "Other"
+                    acct_id  = t["account_id"]
+                    pending  = t["pending"]
+                    txn = {
                         "transaction_id": t["transaction_id"],
-                        "date":    str(t["date"]),
-                        "name":    t["name"],
-                        "amount":  amt,
-                        "category": t["category"][0] if t.get("category") else "Other",
-                        "account_id": t["account_id"],
-                        "pending": t["pending"],
-                    })
-                    # Positive Plaid amount = debit (money out)
-                    if amt > 0 and not t["pending"]:
+                        "date":           str(t["date"]),
+                        "name":           t["name"],
+                        "amount":         amt,
+                        "category":       cat_raw,
+                        "account_id":     acct_id,
+                        "pending":        pending,
+                    }
+                    transactions.append(txn)
+
+                    # Only count as spending: depository, positive, non-pending, non-transfer
+                    is_depository_txn  = acct_id in depository_ids
+                    is_excluded_cat    = cat_raw.lower() in EXCLUDED_CATEGORIES
+                    if amt > 0 and not pending and is_depository_txn and not is_excluded_cat:
                         monthly_spending += amt
             except Exception:
                 continue
@@ -479,17 +503,24 @@ async def finance_summary():
 
     transactions.sort(key=lambda x: x["date"], reverse=True)
 
+    # Sandbox flag so the Android app can show an appropriate disclaimer
+    plaid_env = os.getenv("PLAID_ENV", "sandbox")
+    has_cash_or_investments = total_cash > 0 or total_investments > 0
+
     return {
-        "total_cash":            round(total_cash, 2),
-        "total_credit_card_debt":round(total_credit_debt, 2),
-        "total_investments":     round(total_investments, 2),
-        "net_worth":             round(net_worth, 2),
-        "monthly_spending":      round(monthly_spending, 2),
-        "accounts":              accounts,
-        "credit_cards":          credit_cards,
-        "recent_transactions":   transactions[:25],
-        "has_connected_accounts":len(accounts) > 0,
-        "last_synced":           dt.datetime.utcnow().isoformat() + "Z",
+        "total_cash":              round(total_cash, 2),
+        "total_credit_card_debt":  round(total_credit_debt, 2),
+        "total_investments":       round(total_investments, 2),
+        "total_loans":             round(total_loans, 2),
+        "net_worth":               round(net_worth, 2),
+        "monthly_spending":        round(monthly_spending, 2),
+        "accounts":                accounts,
+        "credit_cards":            credit_cards,
+        "recent_transactions":     transactions[:25],
+        "has_connected_accounts":  len(accounts) > 0,
+        "has_cash_or_investments": has_cash_or_investments,
+        "plaid_env":               plaid_env,
+        "last_synced":             dt.datetime.utcnow().isoformat() + "Z",
     }
 
 
