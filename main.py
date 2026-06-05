@@ -4,9 +4,10 @@ import os
 from contextlib import asynccontextmanager
 
 import asyncpg
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # ── DB pool ───────────────────────────────────────────────────────────────────
@@ -74,6 +75,135 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Nexus API", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# Serve logo and other static assets from ./static/
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(_STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
+# ── PIN session gate ──────────────────────────────────────────────────────────
+_DASHBOARD_PIN   = os.getenv("DASHBOARD_PIN", "")      # set in Railway env vars
+_PIN_SESSION_KEY = "nx_session"
+_PIN_SESSIONS: set[str] = set()   # in-memory; cleared on restart (intentional)
+
+def _is_authed(request: Request) -> bool:
+    """Return True if the request carries a valid session cookie or no PIN is set."""
+    if not _DASHBOARD_PIN:
+        return True
+    return request.cookies.get(_PIN_SESSION_KEY, "") in _PIN_SESSIONS
+
+def _pin_page(redirect: str = "/") -> HTMLResponse:
+    """Return the PIN entry HTML page."""
+    logo = '/static/nexus.png' if os.path.isdir(_STATIC_DIR) else ''
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nexus — Secure Access</title>
+<style>
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{background:#080F1A;display:flex;align-items:center;justify-content:center;
+       min-height:100vh;font-family:'Inter',system-ui,sans-serif;color:#E2E8F0}}
+  .card{{background:#111827;border:1px solid #1E293B;border-radius:20px;
+         padding:40px 36px;width:340px;text-align:center;box-shadow:0 0 40px #0AAAFF18}}
+  .logo{{width:84px;height:84px;border-radius:20px;margin:0 auto 20px;object-fit:contain}}
+  .logo-placeholder{{width:84px;height:84px;border-radius:20px;margin:0 auto 20px;
+    background:radial-gradient(circle,#0AAAFF22,#8B5CF612,transparent);
+    display:flex;align-items:center;justify-content:center;font-size:36px}}
+  h1{{font-size:26px;font-weight:800;letter-spacing:.5px;margin-bottom:4px}}
+  .sub{{font-size:12px;color:#475569;margin-bottom:32px}}
+  .dots{{display:flex;gap:14px;justify-content:center;margin-bottom:24px}}
+  .dot{{width:13px;height:13px;border-radius:50%;background:#1E293B;
+        transition:background .15s,box-shadow .15s}}
+  .dot.filled{{background:#0AAAFF;box-shadow:0 0 8px #0AAAFF88}}
+  .dot.error{{background:#EF4444;box-shadow:0 0 8px #EF444488}}
+  .pad{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}
+  .key{{background:#1E293B;border:none;border-radius:50%;width:68px;height:68px;
+        font-size:22px;font-weight:500;color:#E2E8F0;cursor:pointer;
+        transition:background .12s,transform .08s;margin:auto}}
+  .key:hover{{background:#334155;transform:scale(1.05)}}
+  .key:active{{background:#0AAAFF22;transform:scale(.97)}}
+  .key.del{{font-size:16px;color:#94A3B8}}
+  .key.empty{{visibility:hidden}}
+  .err{{color:#EF4444;font-size:12px;height:16px;margin-top:8px}}
+  @keyframes shake{{0%,100%{{transform:translateX(0)}}20%,60%{{transform:translateX(-8px)}}
+                    40%,80%{{transform:translateX(8px)}}}}
+  .shake{{animation:shake .35s ease}}
+</style>
+</head>
+<body>
+<div class="card">
+  {'<img class="logo" src="'+logo+'" alt="Nexus logo">' if logo else '<div class="logo-placeholder">◈</div>'}
+  <h1>Nexus</h1>
+  <p class="sub">Personal Command Center</p>
+  <div class="dots" id="dots">
+    <div class="dot" id="d0"></div>
+    <div class="dot" id="d1"></div>
+    <div class="dot" id="d2"></div>
+    <div class="dot" id="d3"></div>
+  </div>
+  <div class="pad">
+    {''.join(f'<button class="key" onclick="tap({i})">{i}</button>' for i in range(1,10))}
+    <button class="key empty"></button>
+    <button class="key" onclick="tap(0)">0</button>
+    <button class="key del" onclick="del_()">⌫</button>
+  </div>
+  <div class="err" id="err"></div>
+</div>
+<script>
+let pin='';
+const LEN=4;
+function tap(n){{
+  if(pin.length>=LEN) return;
+  pin+=n;
+  render();
+  if(pin.length===LEN) submit();
+}}
+function del_(){{pin=pin.slice(0,-1);render();}}
+function render(){{
+  for(let i=0;i<LEN;i++){{
+    const d=document.getElementById('d'+i);
+    d.className='dot'+(i<pin.length?' filled':'');
+  }}
+}}
+async function submit(){{
+  const r=await fetch('/pin-auth',{{method:'POST',
+    headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify({{pin,redirect:'{redirect}'}})
+  }});
+  const j=await r.json();
+  if(j.ok){{window.location.href=j.redirect;}}
+  else{{
+    for(let i=0;i<LEN;i++) document.getElementById('d'+i).className='dot error';
+    document.getElementById('dots').classList.add('shake');
+    document.getElementById('err').textContent='Incorrect PIN';
+    setTimeout(()=>{{
+      pin='';render();
+      document.getElementById('dots').classList.remove('shake');
+      document.getElementById('err').textContent='';
+    }},600);
+  }}
+}}
+document.addEventListener('keydown',e=>{{
+  if(e.key>='0'&&e.key<='9') tap(parseInt(e.key));
+  else if(e.key==='Backspace') del_();
+}});
+</script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+@app.post("/pin-auth")
+async def pin_auth(body: dict, response: Response):
+    """Verify PIN and issue a session cookie."""
+    if not _DASHBOARD_PIN or body.get("pin") == _DASHBOARD_PIN:
+        import secrets
+        token = secrets.token_hex(24)
+        _PIN_SESSIONS.add(token)
+        response.set_cookie(_PIN_SESSION_KEY, token, httponly=True, samesite="strict", max_age=43200)
+        return {"ok": True, "redirect": body.get("redirect", "/")}
+    return {"ok": False}
+
 # ── Plaid helpers ─────────────────────────────────────────────────────────────
 
 def _plaid_client():
@@ -111,7 +241,9 @@ async def health():
 
 
 @app.get("/", response_class=HTMLResponse)
-async def bank_dashboard():
+async def bank_dashboard(request: Request):
+    if not _is_authed(request):
+        return _pin_page(redirect="/")
     env = os.getenv("PLAID_ENV", "sandbox")
     html = f"""<!DOCTYPE html>
 <html lang="en">
