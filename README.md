@@ -100,3 +100,14 @@ Deployed on **Railway** with automatic deploys from the `main` branch.
 | Banking data | Plaid SDK |
 | Database | Supabase (asyncpg) |
 | Deployment | Railway |
+
+---
+
+## Project Separation
+
+Nexus API handles Plaid banking data only. It is **not** connected to work-schedule-sync unless explicitly integrated later.
+
+- The Railway deployment URL must not be committed to any public file
+- All secrets (Plaid, Supabase, API keys) must be Railway environment variables only
+- No phone numbers, Twilio tokens, SMS credentials, or calendar IDs belong in this service
+- If schedule conflict status is surfaced in the future, it must be report-only — conflicts must never trigger automatic calendar edits
