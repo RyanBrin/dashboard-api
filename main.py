@@ -571,7 +571,7 @@ async def create_link_token():
 
         resp = client.link_token_create(LinkTokenCreateRequest(**kwargs))
         import logging; logging.getLogger(__name__).info("Plaid link token created")
-        return {"link_token": resp["link_token"]}
+        return {"link_token": resp.link_token}
     except Exception as e:
         import logging; logging.getLogger(__name__).error("Plaid link token creation failed: %s", type(e).__name__)
         raise HTTPException(status_code=500, detail=str(e))
@@ -593,22 +593,22 @@ async def exchange_token(body: ExchangeTokenBody):
         resp = client.item_public_token_exchange(
             ItemPublicTokenExchangeRequest(public_token=body.public_token)
         )
-        access_token = resp["access_token"]
-        item_id      = resp["item_id"]
+        access_token = resp.access_token
+        item_id      = resp.item_id
         log.info("Plaid token exchange complete — item stored")
 
         # Lookup institution name using proper SDK model (not a dict)
         institution_name = None
         try:
             item_resp = client.item_get(ItemGetRequest(access_token=access_token))
-            inst_id = item_resp["item"].get("institution_id")
+            inst_id = getattr(item_resp.item, 'institution_id', None)
             if inst_id:
                 inst_resp = client.institutions_get_by_id(
                     InstitutionsGetByIdRequest(
                         institution_id=inst_id, country_codes=[CountryCode("US")]
                     )
                 )
-                institution_name = inst_resp["institution"]["name"]
+                institution_name = inst_resp.institution.name
                 log.info("Institution identified")
         except Exception as inst_err:
             log.warning("Could not look up institution name: %s", type(inst_err).__name__)
@@ -650,15 +650,16 @@ async def get_accounts():
         def _parse_accounts(resp_accounts, institution):
             result = []
             for acct in resp_accounts:
+                bal = acct.balances
                 result.append({
-                    "account_id":        acct["account_id"],
-                    "name":              acct["name"],
-                    "official_name":     acct.get("official_name"),
-                    "type":              str(acct["type"]),
-                    "subtype":           str(acct.get("subtype", "")),
-                    "current_balance":   acct["balances"]["current"],
-                    "available_balance": acct["balances"]["available"],
-                    "currency":          acct["balances"].get("iso_currency_code", "USD"),
+                    "account_id":        acct.account_id,
+                    "name":              acct.name,
+                    "official_name":     getattr(acct, 'official_name', None),
+                    "type":              str(acct.type),
+                    "subtype":           str(getattr(acct, 'subtype', '') or ''),
+                    "current_balance":   bal.current,
+                    "available_balance": bal.available,
+                    "currency":          getattr(bal, 'iso_currency_code', None) or 'USD',
                     "institution":       institution,
                 })
             return result
@@ -670,8 +671,8 @@ async def get_accounts():
                 resp = client.accounts_balance_get(
                     AccountsBalanceGetRequest(access_token=row["access_token"])
                 )
-                all_accounts.extend(_parse_accounts(resp["accounts"], row["institution"]))
-                log.info("Fetched %d accounts (balance) from %s", len(resp["accounts"]), row["institution"])
+                all_accounts.extend(_parse_accounts(resp.accounts, row["institution"]))
+                log.info("Fetched %d accounts (balance) from %s", len(resp.accounts), row["institution"])
             except Exception as e:
                 # INVALID_PRODUCT: item was connected before balance product was added.
                 # Fall back to accounts_get which works with transactions product alone.
@@ -690,8 +691,8 @@ async def get_accounts():
                         resp2 = client.accounts_get(
                             AccountsGetRequest(access_token=row["access_token"])
                         )
-                        all_accounts.extend(_parse_accounts(resp2["accounts"], row["institution"]))
-                        log.info("Fetched %d accounts (fallback) from %s", len(resp2["accounts"]), row["institution"])
+                        all_accounts.extend(_parse_accounts(resp2.accounts, row["institution"]))
+                        log.info("Fetched %d accounts (fallback) from %s", len(resp2.accounts), row["institution"])
                     except Exception as e2:
                         log.error("Fallback accounts_get also failed for %s: %s", row["institution"], type(e2).__name__)
                 else:
@@ -732,15 +733,16 @@ async def get_transactions(days: int = 30):
                         options=TransactionsGetRequestOptions(count=250),
                     )
                 )
-                for t in resp["transactions"]:
+                for t in resp.transactions:
+                    cat_list = getattr(t, 'category', None) or []
                     all_txns.append({
-                        "transaction_id": t["transaction_id"],
-                        "date":           str(t["date"]),
-                        "name":           t["name"],
-                        "amount":         t["amount"],
-                        "category":       t["category"][0] if t.get("category") else "Other",
-                        "account_id":     t["account_id"],
-                        "pending":        t["pending"],
+                        "transaction_id": t.transaction_id,
+                        "date":           str(t.date),
+                        "name":           t.name,
+                        "amount":         t.amount,
+                        "category":       cat_list[0] if cat_list else "Other",
+                        "account_id":     t.account_id,
+                        "pending":        t.pending,
                     })
             except Exception:
                 continue
