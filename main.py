@@ -411,6 +411,8 @@ async def bank_dashboard(request: Request):
                   msg = 'Invalid Plaid API credentials. Check Railway PLAID_SECRET.';
                 else if (raw.includes('DATABASE_URL') || raw.includes('503'))
                   msg = 'Database not configured. Check Railway DATABASE_URL.';
+                else if (raw)
+                  msg = raw.length > 200 ? raw.slice(0, 200) + '...' : raw;
                 throw new Error(msg);
               }}
               const exData = await ex.json();
@@ -577,6 +579,23 @@ async def create_link_token():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _extract_plaid_error(e: Exception) -> str:
+    """Return the Plaid error_code from the exception body, or a truncated str(e)."""
+    try:
+        import json as _j
+        body = getattr(e, "body", None)
+        if body:
+            parsed = _j.loads(body) if isinstance(body, (str, bytes)) else body
+            if isinstance(parsed, dict):
+                code = parsed.get("error_code", "")
+                msg  = parsed.get("error_message", "")
+                if code:
+                    return f"{code}: {msg}".rstrip(": ")
+    except Exception:
+        pass
+    return str(e)[:500]
+
+
 @app.post("/plaid/exchange_token")
 async def exchange_token(body: ExchangeTokenBody):
     import logging
@@ -626,9 +645,14 @@ async def exchange_token(body: ExchangeTokenBody):
         return {"ok": True, "item_id": item_id, "institution": institution_name}
 
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).error("Plaid exchange failed: %s", type(e).__name__)
-        raise HTTPException(status_code=500, detail=str(e))
+        import logging, traceback as _tb
+        logging.getLogger(__name__).error(
+            "Plaid exchange failed [%s]: %s\n%s",
+            type(e).__name__, str(e), _tb.format_exc(),
+        )
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail=_extract_plaid_error(e))
 
 
 @app.get("/plaid/accounts")
