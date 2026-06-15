@@ -30,6 +30,10 @@ _PURCHASE_SIGNALS = {
     "pos purchase", "pos debit", "check card", "debit card",
     "card purchase", "card transaction", "purchase", "debit purchase",
 }
+_KNOWN_PAYCHECK_EMPLOYERS = {
+    "bismarck park",
+    "best buy",
+}
 
 
 def _is_income_transaction(txn: dict) -> tuple:
@@ -53,13 +57,14 @@ def _is_income_transaction(txn: dict) -> tuple:
     for kw in _INCOME_KEYWORDS:
         if kw in name:
             return True, "paycheck"
-    if "best buy" in name:
-        if any(sig in name for sig in _PURCHASE_SIGNALS):
-            return False, ""
-        if is_credit and acct_type in ("depository", "checking", "savings", "cash", ""):
-            return True, "paycheck"
-        if any(k in pfc for k in ("INCOME", "PAYROLL")):
-            return True, "paycheck"
+    for _employer in _KNOWN_PAYCHECK_EMPLOYERS:
+        if _employer in name:
+            if any(sig in name for sig in _PURCHASE_SIGNALS):
+                break
+            if is_credit and acct_type in ("depository", "checking", "savings", "cash", ""):
+                return True, "paycheck"
+            if any(k in pfc for k in ("INCOME", "PAYROLL")):
+                return True, "paycheck"
     if is_credit and acct_type in ("depository", "checking", "savings", "cash", ""):
         if any(k in name for k in ("deposit", "credit", "refund", "return")):
             if any(k in name for k in ("refund", "return", "adjustment", "reversal")):
@@ -148,72 +153,89 @@ def check(label, txn, expect_income, expect_cat=None, expect_income_type=None):
         FAIL += 1
 
 
+print("=== Bismarck Park (Pebble Creek) payroll ===")
+check("Bismarck Park District deposit -> paycheck",
+      {"name": "Bismarck Park District", "amount": -850.0,
+       "account_type": "depository", "personal_finance_category": "", "category": "", "pending": False},
+      True, expect_income_type="paycheck")
+
+check("Bismarck Park with purchase signal -> not income",
+      {"name": "Bismarck Park Pos Purchase", "amount": 25.00,
+       "account_type": "depository", "personal_finance_category": "", "category": "", "pending": False},
+      False)
+
+check("Bismarck Park pending -> not income",
+      {"name": "Bismarck Park District", "amount": -850.0,
+       "account_type": "depository", "personal_finance_category": "", "category": "", "pending": True},
+      False)
+
+print()
 print("=== Best Buy payroll vs purchase ===")
-check("BB direct deposit (neg, depository) → paycheck",
+check("BB direct deposit (neg, depository) -> paycheck",
       {"name": "Best Buy Direct Deposit", "amount": -1234.56,
        "account_type": "depository", "personal_finance_category": "", "category": "", "pending": False},
       True, expect_income_type="paycheck")
 
-check("BB POS Purchase (pos, depository) → Tech/Best Buy spending",
+check("BB POS Purchase (pos, depository) -> Tech/Best Buy spending",
       {"name": "Best Buy POS Purchase", "amount": 49.99,
        "account_type": "depository", "personal_finance_category": "", "category": "", "pending": False},
       False, "Tech / Best Buy")
 
-check("BB Check Card (purchase signal) → Tech/Best Buy spending",
+check("BB Check Card (purchase signal) -> Tech/Best Buy spending",
       {"name": "Best Buy Check Card 1234", "amount": 89.99,
        "account_type": "depository", "personal_finance_category": "", "category": "shops", "pending": False},
       False, "Tech / Best Buy")
 
-check("BB PFC=INCOME_PAYROLL → paycheck",
+check("BB PFC=INCOME_PAYROLL -> paycheck",
       {"name": "Best Buy Payroll", "amount": -2000.0,
        "account_type": "depository", "personal_finance_category": "INCOME_PAYROLL", "category": "", "pending": False},
       True, expect_income_type="paycheck")
 
-check("BB on credit account SHOPPING_ELECTRONICS → Tech/Best Buy",
+check("BB on credit account SHOPPING_ELECTRONICS -> Tech/Best Buy",
       {"name": "Best Buy", "amount": 299.99,
        "account_type": "credit", "personal_finance_category": "SHOPPING_ELECTRONICS", "category": "shops", "pending": False},
       False, "Tech / Best Buy")
 
-check("BB positive on credit (no purchase signal) → Tech/Best Buy via keyword",
+check("BB positive on credit (no purchase signal) -> Tech/Best Buy via keyword",
       {"name": "Best Buy", "amount": 15.00,
        "account_type": "credit", "personal_finance_category": "", "category": "shops", "pending": False},
       False, "Tech / Best Buy")
 
 print()
 print("=== General income ===")
-check("Payroll direct deposit keyword → paycheck",
+check("Payroll direct deposit keyword -> paycheck",
       {"name": "Payroll Direct Deposit", "amount": -1800.0,
        "account_type": "depository", "personal_finance_category": "", "category": "", "pending": False},
       True, expect_income_type="paycheck")
 
-check("ACH Credit employer deposit → paycheck",
+check("ACH Credit employer deposit -> paycheck",
       {"name": "ACH Credit Employer Deposit", "amount": -950.0,
        "account_type": "depository", "personal_finance_category": "", "category": "", "pending": False},
       True, expect_income_type="paycheck")
 
-check("PFC INCOME_PAYROLL → paycheck",
+check("PFC INCOME_PAYROLL -> paycheck",
       {"name": "Employer Co Payroll", "amount": -2100.0,
        "account_type": "depository", "personal_finance_category": "INCOME_PAYROLL", "category": "", "pending": False},
       True, expect_income_type="paycheck")
 
-check("Wages keyword → paycheck",
+check("Wages keyword -> paycheck",
       {"name": "Wages from Company", "amount": -500.0,
        "account_type": "depository", "personal_finance_category": "", "category": "", "pending": False},
       True)
 
 print()
 print("=== Exclusions (not counted as spending OR income) ===")
-check("Pending transaction → excluded",
+check("Pending transaction -> excluded",
       {"name": "Best Buy Direct Deposit", "amount": -1000.0,
        "account_type": "depository", "personal_finance_category": "", "category": "", "pending": True},
       False)
 
-check("Zelle transfer → excluded transfer",
+check("Zelle transfer -> excluded transfer",
       {"name": "Zelle Payment From Ryan", "amount": -200.0,
        "account_type": "depository", "personal_finance_category": "", "category": "transfer", "pending": False},
       False)
 
-check("CC payment → excluded",
+check("CC payment -> excluded",
       {"name": "Chase Credit Card Payment", "amount": 500.0,
        "account_type": "depository", "personal_finance_category": "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT",
        "category": "payment", "pending": False},
@@ -221,17 +243,17 @@ check("CC payment → excluded",
 
 print()
 print("=== Spending correctly classified ===")
-check("Starbucks → Food / Drinks",
+check("Starbucks -> Food / Drinks",
       {"name": "Starbucks", "amount": 6.50, "account_type": "depository",
        "personal_finance_category": "", "category": "coffee shop", "pending": False},
       False, "Food / Drinks")
 
-check("Spotify → Apps / Subscriptions",
+check("Spotify -> Apps / Subscriptions",
       {"name": "Spotify USA", "amount": 9.99, "account_type": "depository",
        "personal_finance_category": "", "category": "subscription", "pending": False},
       False, "Apps / Subscriptions")
 
-check("Generic POS on depository → Other (no match)",
+check("Generic POS on depository -> Other (no match)",
       {"name": "Some Unknown Merchant", "amount": 23.00, "account_type": "depository",
        "personal_finance_category": "", "category": "", "pending": False},
       False, "Other")

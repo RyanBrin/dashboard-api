@@ -948,6 +948,13 @@ _PURCHASE_SIGNALS = {
     "card purchase", "card transaction", "purchase", "debit purchase",
 }
 
+# Employer names whose depository credits are always paychecks
+# "bismarck park" = Bismarck Park District (Pebble Creek Golf Course employer via Plaid)
+_KNOWN_PAYCHECK_EMPLOYERS = {
+    "bismarck park",
+    "best buy",
+}
+
 
 def _is_income_transaction(txn: dict) -> tuple[bool, str]:
     """
@@ -997,20 +1004,16 @@ def _is_income_transaction(txn: dict) -> tuple[bool, str]:
         if kw in name:
             return True, "paycheck"
 
-    # ── 4. Best Buy payroll vs purchase disambiguation ────────────────────────
-    # This must run BEFORE the generic keyword table that would tag BB as spending.
-    if "best buy" in name:
-        # Check for purchase signals first — if present, it is a purchase
-        if any(sig in name for sig in _PURCHASE_SIGNALS):
-            return False, ""
-        # Depository credit (negative amount) = incoming deposit → paycheck
-        if is_credit_to_account and acct_type in ("depository", "checking", "savings", "cash", ""):
-            return True, "paycheck"
-        # Plaid already said it's income (belt-and-suspenders)
-        if any(k in pfc for k in ("INCOME", "PAYROLL")):
-            return True, "paycheck"
-        # Positive amount on depository that contains payroll signals → purchase
-        # (falls through to normal expense path)
+    # ── 4. Known employer names (payroll vs purchase disambiguation) ─────────────
+    # Runs before generic keyword table so employer credits aren't misclassified.
+    for _employer in _KNOWN_PAYCHECK_EMPLOYERS:
+        if _employer in name:
+            if any(sig in name for sig in _PURCHASE_SIGNALS):
+                break   # purchase signals override → fall through to expense path
+            if is_credit_to_account and acct_type in ("depository", "checking", "savings", "cash", ""):
+                return True, "paycheck"
+            if any(k in pfc for k in ("INCOME", "PAYROLL")):
+                return True, "paycheck"
 
     # ── 5. Generic depository credits that look like deposits ─────────────────
     if is_credit_to_account and acct_type in ("depository", "checking", "savings", "cash", ""):
